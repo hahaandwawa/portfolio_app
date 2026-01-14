@@ -1,0 +1,407 @@
+import { transactionDao, holdingDao } from '../db/dao.js';
+import { withTransaction } from '../db/index.js';
+import { logger } from '../utils/logger.js';
+import type { 
+  Transaction, 
+  CreateTransactionRequest,
+  UpdateTransactionRequest,
+  Holding, 
+  TransactionQuery 
+} from '../../shared/types.js';
+
+/**
+ * 交易服务 - 处理交易录入、校验和持仓更新
+ */
+export const transactionService = {
+  /**
+   * 创建交易记录
+   * 执行校验、写入交易、更新持仓
+   */
+  createTransaction(data: CreateTransactionRequest): { transaction: Transaction; holding: Holding } {
+    // 基础校验
+    this.validateTransaction(data);
+
+    // 卖出校验
+    if (data.type === 'sell') {
+      const currentHolding = holdingDao.getBySymbol(data.symbol);
+      const currentQty = currentHolding?.total_qty || 0;
+      
+      if (data.quantity > currentQty) {
+        throw new TransactionError(
+          `卖出数量 (${data.quantity}) 超过当前持仓量 (${currentQty})`,
+          409
+        );
+      }
+    }
+
+    // 写入交易记录
+    const transaction = transactionDao.create(data);
+    
+    // 更新持仓
+    const holding = this.updateHolding(data);
+    
+    return { transaction, holding };
+  },
+
+  /**
+   * 校验交易数据
+   */
+  validateTransaction(data: CreateTransactionRequest): void {
+    if (!data.symbol || data.symbol.trim() === '') {
+      throw new TransactionError('股票代码不能为空', 400);
+    }
+    
+    if (!['buy', 'sell'].includes(data.type)) {
+      throw new TransactionError('交易类型必须是 buy 或 sell', 400);
+    }
+    
+    if (typeof data.price !== 'number' || data.price <= 0) {
+      throw new TransactionError('价格必须是正数', 400);
+    }
+    
+    if (typeof data.quantity !== 'number' || data.quantity <= 0) {
+      throw new TransactionError('数量必须是正数', 400);
+    }
+    
+    if (data.fee !== undefined && (typeof data.fee !== 'number' || data.fee < 0)) {
+      throw new TransactionError('手续费不能为负数', 400);
+    }
+    
+    if (!data.trade_date || !/^\d{4}-\d{2}-\d{2}$/.test(data.trade_date)) {
+      throw new TransactionError('交易日期格式无效，应为 YYYY-MM-DD', 400);
+    }
+  },
+
+  /**
+   * 更新持仓（使用加权平均法）
+   */
+  updateHolding(data: CreateTransactionRequest): Holding {
+    const symbol = data.symbol.toUpperCase();
+    const currentHolding = holdingDao.getBySymbol(symbol);
+    
+    let newAvgCost: number;
+    let newTotalQty: number;
+    const fee = data.fee || 0;
+
+    if (data.type === 'buy') {
+      // 买入：加权平均成本计算
+      const currentQty = currentHolding?.total_qty || 0;
+      const currentCost = currentHolding?.avg_cost || 0;
+      
+      // 新的总成本 = 原持仓成本 + 新买入成本（含手续费）
+      const totalCostBefore = currentQty * currentCost;
+      const newPurchaseCost = data.quantity * data.price + fee;
+      const totalCostAfter = totalCostBefore + newPurchaseCost;
+      
+      newTotalQty = currentQty + data.quantity;
+      newAvgCost = newTotalQty > 0 ? totalCostAfter / newTotalQty : 0;
+    } else {
+      // 卖出：减少数量，成本不变（或可记录已实现盈亏）
+      const currentQty = currentHolding?.total_qty || 0;
+      newTotalQty = currentQty - data.quantity;
+      newAvgCost = currentHolding?.avg_cost || 0;
+    }
+
+    // 更新持仓
+    const holding: Omit<Holding, 'updated_at'> = {
+      symbol,
+      name: data.name || currentHolding?.name || null,
+      avg_cost: newAvgCost,
+      total_qty: newTotalQty,
+      last_price: currentHolding?.last_price || data.price,
+      currency: data.currency || currentHolding?.currency || 'USD',
+    };
+
+    if (newTotalQty > 0) {
+      holdingDao.upsert(holding);
+    } else {
+      // 清仓：可以选择删除或保留记录
+      holdingDao.upsert({ ...holding, total_qty: 0 });
+    }
+
+    return holdingDao.getBySymbol(symbol)!;
+  },
+
+  /**
+   * 从交易记录重新计算持仓
+   * 用于数据修正或恢复
+   */
+  recalculateHoldings(): Map<string, Holding> {
+    const holdings = new Map<string, Holding>();
+    
+    // 获取所有交易，按时间顺序
+    const transactions = transactionDao.getAll().reverse();
+    
+    for (const tx of transactions) {
+      const symbol = tx.symbol.toUpperCase();
+      let holding = holdings.get(symbol);
+      
+      if (!holding) {
+        holding = {
+          symbol,
+          name: tx.name,
+          avg_cost: 0,
+          total_qty: 0,
+          last_price: 0,
+          currency: tx.currency,
+          updated_at: null,
+        };
+      }
+
+      if (tx.type === 'buy') {
+        const totalCostBefore = holding.total_qty * holding.avg_cost;
+        const newPurchaseCost = tx.quantity * tx.price + tx.fee;
+        const totalCostAfter = totalCostBefore + newPurchaseCost;
+        
+        holding.total_qty += tx.quantity;
+        holding.avg_cost = holding.total_qty > 0 ? totalCostAfter / holding.total_qty : 0;
+      } else {
+        holding.total_qty -= tx.quantity;
+      }
+
+      // 更新名称
+      if (tx.name) {
+        holding.name = tx.name;
+      }
+
+      holdings.set(symbol, holding);
+    }
+
+    // 写入数据库
+    withTransaction(() => {
+      for (const holding of holdings.values()) {
+        holdingDao.upsert(holding);
+      }
+    });
+
+    return holdings;
+  },
+
+  /**
+   * 查询交易记录
+   */
+  queryTransactions(params: TransactionQuery) {
+    return transactionDao.query(params);
+  },
+
+  /**
+   * 获取股票的所有交易
+   */
+  getTransactionsBySymbol(symbol: string): Transaction[] {
+    return transactionDao.getBySymbol(symbol);
+  },
+
+  /**
+   * 更新交易记录（需要重新计算持仓）
+   */
+  updateTransaction(id: number, data: UpdateTransactionRequest): { transaction: Transaction; holding: Holding } {
+    const existingTransaction = transactionDao.getById(id);
+    if (!existingTransaction) {
+      throw new TransactionError('交易记录不存在', 404);
+    }
+
+    // 校验更新数据
+    if (data.price !== undefined && data.price <= 0) {
+      throw new TransactionError('价格必须是正数', 400);
+    }
+    if (data.quantity !== undefined && data.quantity <= 0) {
+      throw new TransactionError('数量必须是正数', 400);
+    }
+    if (data.fee !== undefined && data.fee < 0) {
+      throw new TransactionError('手续费不能为负数', 400);
+    }
+    if (data.type && !['buy', 'sell'].includes(data.type)) {
+      throw new TransactionError('交易类型必须是 buy 或 sell', 400);
+    }
+
+    try {
+      logger.debug(`开始更新交易记录 ID=${id}`, data);
+      const result = withTransaction(() => {
+        // 更新交易记录
+        const updatedTransaction = transactionDao.update(id, data);
+        
+        // 确认更新成功
+        if (!updatedTransaction) {
+          throw new TransactionError('更新交易记录失败：无法获取更新后的记录', 500);
+        }
+        
+        // 重新计算相关股票的持仓
+        const symbol = data.symbol?.toUpperCase() || existingTransaction.symbol;
+        const holding = this.recalculateHoldingForSymbol(symbol);
+        
+        // 如果股票代码改变了，也需要重新计算原股票的持仓
+        if (data.symbol && data.symbol.toUpperCase() !== existingTransaction.symbol) {
+          this.recalculateHoldingForSymbol(existingTransaction.symbol);
+        }
+        
+        if (!holding) {
+          throw new TransactionError('重新计算持仓失败', 500);
+        }
+        
+        return { transaction: updatedTransaction, holding };
+      });
+      
+      // 最终确认：再次查询数据库验证更新是否成功
+      const finalCheck = transactionDao.getById(id);
+      if (!finalCheck) {
+        throw new TransactionError('更新交易记录失败：最终验证时无法找到记录', 500);
+      }
+      
+      logger.info(`交易记录更新成功: ID=${id}`);
+      return result;
+    } catch (error) {
+      logger.error(`更新交易记录失败: ID=${id}`, error);
+      if (error instanceof TransactionError) {
+        throw error;
+      }
+      throw new TransactionError(
+        error instanceof Error ? error.message : '更新交易记录失败',
+        500
+      );
+    }
+  },
+
+  /**
+   * 删除交易（需要重新计算持仓）
+   */
+  deleteTransaction(id: number): boolean {
+    try {
+      const transaction = transactionDao.getById(id);
+      if (!transaction) {
+        throw new TransactionError('交易记录不存在', 404);
+      }
+
+      logger.debug(`开始删除交易记录 ID=${id}`, transaction);
+      
+      const result = withTransaction(() => {
+        const deleted = transactionDao.delete(id);
+        if (!deleted) {
+          throw new TransactionError('删除交易记录失败：数据库操作返回 false', 500);
+        }
+        
+        // 最终确认：再次查询数据库验证删除是否成功
+        const finalCheck = transactionDao.getById(id);
+        if (finalCheck) {
+          throw new TransactionError('删除交易记录失败：删除后记录仍然存在', 500);
+        }
+        
+        try {
+          // 重新计算该股票的持仓
+          this.recalculateHoldingForSymbol(transaction.symbol);
+        } catch (error) {
+          logger.warn('重新计算持仓失败，但交易已删除', error);
+          // 即使重新计算失败，交易已经删除，所以继续
+        }
+        
+        return deleted;
+      });
+      
+      // 最终确认：再次查询数据库验证删除是否成功
+      const finalCheck = transactionDao.getById(id);
+      if (finalCheck) {
+        throw new TransactionError('删除交易记录失败：最终验证时记录仍然存在', 500);
+      }
+      
+      logger.info(`交易记录删除成功: ID=${id}`);
+      return result;
+    } catch (error) {
+      logger.error(`删除交易记录失败: ID=${id}`, error);
+      if (error instanceof TransactionError) {
+        throw error;
+      }
+      throw new TransactionError(
+        error instanceof Error ? error.message : '删除交易失败',
+        500
+      );
+    }
+  },
+
+  /**
+   * 重新计算单只股票的持仓
+   */
+  recalculateHoldingForSymbol(symbol: string): Holding | null {
+    const transactions = transactionDao.getBySymbol(symbol);
+    
+    if (transactions.length === 0) {
+      holdingDao.delete(symbol);
+      return null;
+    }
+
+    let avgCost = 0;
+    let totalQty = 0;
+    let name: string | null = null;
+    let currency = 'USD';
+
+    for (const tx of transactions) {
+      if (tx.type === 'buy') {
+        const totalCostBefore = totalQty * avgCost;
+        const newPurchaseCost = tx.quantity * tx.price + tx.fee;
+        totalQty += tx.quantity;
+        avgCost = totalQty > 0 ? (totalCostBefore + newPurchaseCost) / totalQty : 0;
+      } else {
+        totalQty -= tx.quantity;
+      }
+      
+      if (tx.name) name = tx.name;
+      currency = tx.currency;
+    }
+
+    const currentHolding = holdingDao.getBySymbol(symbol);
+    
+    const holding: Omit<Holding, 'updated_at'> = {
+      symbol: symbol.toUpperCase(),
+      name,
+      avg_cost: avgCost,
+      total_qty: Math.max(0, totalQty),
+      last_price: currentHolding?.last_price || 0,
+      currency,
+    };
+
+    holdingDao.upsert(holding);
+    return holdingDao.getBySymbol(symbol);
+  },
+
+  /**
+   * 导出所有交易为 CSV 格式
+   */
+  exportToCsv(): string {
+    const transactions = transactionDao.getAll();
+    const headers = ['ID', '股票代码', '名称', '类型', '价格', '数量', '手续费', '币种', '交易日期', '创建时间'];
+    
+    const rows = transactions.map(tx => [
+      tx.id,
+      tx.symbol,
+      tx.name || '',
+      tx.type === 'buy' ? '买入' : '卖出',
+      tx.price,
+      tx.quantity,
+      tx.fee,
+      tx.currency,
+      tx.trade_date,
+      tx.created_at,
+    ]);
+
+    const csvContent = [
+      headers.join(','),
+      ...rows.map(row => row.map(cell => `"${cell}"`).join(',')),
+    ].join('\n');
+
+    return csvContent;
+  },
+};
+
+/**
+ * 交易错误类
+ */
+export class TransactionError extends Error {
+  constructor(
+    message: string,
+    public statusCode: number = 400
+  ) {
+    super(message);
+    this.name = 'TransactionError';
+  }
+}
+
+export default transactionService;
+
