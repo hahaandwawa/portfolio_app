@@ -337,14 +337,6 @@ export const snapshotService = {
   },
 
   /**
-   * 判断是否为交易日（周一到周五）
-   */
-  isTradingDay(date: Date = new Date()): boolean {
-    const dayOfWeek = date.getDay();
-    return dayOfWeek >= 1 && dayOfWeek <= 5; // 周一到周五
-  },
-
-  /**
    * 设置自动快照任务（开盘和收市）
    * 开盘时间：09:30 ET（美股）
    * 收市时间：16:00 ET（4:00 PM，美股）
@@ -401,33 +393,6 @@ export const snapshotService = {
     return { intervals, cleanup };
   },
 
-  /**
-   * 设置定时任务（每日生成快照）- 保留向后兼容
-   * @param hour 执行小时（24小时制），默认 23
-   * @param minute 执行分钟，默认 59
-   * @deprecated 使用 scheduleAutoSnapshots 代替
-   */
-  scheduleDaily(hour: number = 23, minute: number = 59): NodeJS.Timeout {
-    const checkAndRun = async () => {
-      const now = new Date();
-      if (now.getHours() === hour && now.getMinutes() === minute) {
-        await this.createTodaySnapshot();
-      }
-    };
-
-    // 每分钟检查一次
-    return setInterval(checkAndRun, 60 * 1000);
-  },
-
-  /**
-   * 删除旧快照（可选，用于清理）
-   * @param beforeDate 删除此日期之前的快照
-   */
-  deleteOldSnapshots(beforeDate: string): number {
-    // 暂不实现删除功能，保留所有历史数据
-    console.warn('deleteOldSnapshots 暂未实现');
-    return 0;
-  },
 };
 
 export default snapshotService;
