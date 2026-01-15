@@ -8,8 +8,8 @@ export const cashService = {
   /**
    * 获取所有现金账户
    */
-  getAllAccounts(): CashAccount[] {
-    return cashAccountDao.getAll();
+  getAllAccounts(accountIds?: number[]): CashAccount[] {
+    return cashAccountDao.getAll(accountIds);
   },
 
   /**
@@ -64,8 +64,8 @@ export const cashService = {
   /**
    * 获取总现金余额
    */
-  getTotalCash(): number {
-    return cashAccountDao.getTotalCash();
+  getTotalCash(accountIds?: number[]): number {
+    return cashAccountDao.getTotalCash(accountIds);
   },
 };
 

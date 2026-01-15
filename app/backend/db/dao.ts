@@ -11,6 +11,9 @@ import type {
   CashAccount,
   CreateCashAccountRequest,
   UpdateCashAccountRequest,
+  Account,
+  CreateAccountRequest,
+  UpdateAccountRequest,
 } from '../../shared/types.js';
 
 // ==================== 交易 DAO ====================
@@ -21,9 +24,10 @@ export const transactionDao = {
    */
   create(data: CreateTransactionRequest): Transaction {
     const result = run(
-      `INSERT INTO transactions (symbol, name, type, price, quantity, fee, currency, trade_date)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO transactions (account_id, symbol, name, type, price, quantity, fee, currency, trade_date)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
+        data.account_id,
         data.symbol.toUpperCase(),
         data.name || null,
         data.type,
@@ -58,6 +62,10 @@ export const transactionDao = {
     const updates: string[] = [];
     const values: (string | number)[] = [];
 
+    if (data.account_id !== undefined) {
+      updates.push('account_id = ?');
+      values.push(data.account_id);
+    }
     if (data.symbol !== undefined) {
       updates.push('symbol = ?');
       values.push(data.symbol.toUpperCase());
@@ -121,6 +129,11 @@ export const transactionDao = {
     const conditions: string[] = [];
     const values: (string | number)[] = [];
 
+    if (params.account_ids && params.account_ids.length > 0) {
+      const placeholders = params.account_ids.map(() => '?').join(',');
+      conditions.push(`account_id IN (${placeholders})`);
+      values.push(...params.account_ids);
+    }
     if (params.symbol) {
       conditions.push('symbol = ?');
       values.push(params.symbol.toUpperCase());
@@ -163,12 +176,21 @@ export const transactionDao = {
   /**
    * 获取某只股票的所有交易
    */
-  getBySymbol(symbol: string): Transaction[] {
+  getBySymbol(symbol: string, accountIds?: number[]): Transaction[] {
+    const conditions: string[] = ['symbol = ?'];
+    const values: (string | number)[] = [symbol.toUpperCase()];
+    
+    if (accountIds && accountIds.length > 0) {
+      const placeholders = accountIds.map(() => '?').join(',');
+      conditions.push(`account_id IN (${placeholders})`);
+      values.push(...accountIds);
+    }
+    
     return query<Transaction>(
       `SELECT * FROM transactions 
-       WHERE symbol = ? 
+       WHERE ${conditions.join(' AND ')}
        ORDER BY trade_date ASC, created_at ASC`,
-      [symbol.toUpperCase()]
+      values
     );
   },
 
@@ -212,15 +234,44 @@ export const holdingDao = {
   /**
    * 获取所有持仓
    */
-  getAll(): Holding[] {
+  getAll(accountIds?: number[]): Holding[] {
+    if (accountIds && accountIds.length > 0) {
+      const placeholders = accountIds.map(() => '?').join(',');
+      return query<Holding>(
+        `SELECT * FROM holdings WHERE total_qty > 0 AND account_id IN (${placeholders}) ORDER BY symbol`,
+        accountIds
+      );
+    }
     return query<Holding>('SELECT * FROM holdings WHERE total_qty > 0 ORDER BY symbol');
   },
 
   /**
-   * 获取单个持仓
+   * 获取单个持仓（需要指定账户）
    */
-  getBySymbol(symbol: string): Holding | null {
-    return queryOne<Holding>('SELECT * FROM holdings WHERE symbol = ?', [symbol.toUpperCase()]);
+  getBySymbol(symbol: string, accountId: number): Holding | null {
+    return queryOne<Holding>(
+      'SELECT * FROM holdings WHERE symbol = ? AND account_id = ?',
+      [symbol.toUpperCase(), accountId]
+    );
+  },
+
+  /**
+   * 获取某只股票在所有账户的持仓
+   */
+  getAllBySymbol(symbol: string, accountIds?: number[]): Holding[] {
+    const conditions: string[] = ['symbol = ?'];
+    const values: (string | number)[] = [symbol.toUpperCase()];
+    
+    if (accountIds && accountIds.length > 0) {
+      const placeholders = accountIds.map(() => '?').join(',');
+      conditions.push(`account_id IN (${placeholders})`);
+      values.push(...accountIds);
+    }
+    
+    return query<Holding>(
+      `SELECT * FROM holdings WHERE ${conditions.join(' AND ')} ORDER BY account_id`,
+      values
+    );
   },
 
   /**
@@ -228,9 +279,9 @@ export const holdingDao = {
    */
   upsert(holding: Omit<Holding, 'updated_at'>): void {
     run(
-      `INSERT INTO holdings (symbol, name, avg_cost, total_qty, last_price, currency, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
-       ON CONFLICT(symbol) DO UPDATE SET
+      `INSERT INTO holdings (symbol, account_id, name, avg_cost, total_qty, last_price, currency, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+       ON CONFLICT(symbol, account_id) DO UPDATE SET
          name = excluded.name,
          avg_cost = excluded.avg_cost,
          total_qty = excluded.total_qty,
@@ -239,6 +290,7 @@ export const holdingDao = {
          updated_at = datetime('now')`,
       [
         holding.symbol.toUpperCase(),
+        holding.account_id,
         holding.name,
         holding.avg_cost,
         holding.total_qty,
@@ -249,29 +301,49 @@ export const holdingDao = {
   },
 
   /**
-   * 更新最新价格
+   * 更新最新价格（更新所有账户中该股票的持仓）
    */
-  updatePrice(symbol: string, price: number): void {
-    run(
-      `UPDATE holdings 
-       SET last_price = ?, updated_at = datetime('now')
-       WHERE symbol = ?`,
-      [price, symbol.toUpperCase()]
-    );
+  updatePrice(symbol: string, price: number, accountIds?: number[]): void {
+    if (accountIds && accountIds.length > 0) {
+      const placeholders = accountIds.map(() => '?').join(',');
+      run(
+        `UPDATE holdings 
+         SET last_price = ?, updated_at = datetime('now')
+         WHERE symbol = ? AND account_id IN (${placeholders})`,
+        [price, symbol.toUpperCase(), ...accountIds]
+      );
+    } else {
+      run(
+        `UPDATE holdings 
+         SET last_price = ?, updated_at = datetime('now')
+         WHERE symbol = ?`,
+        [price, symbol.toUpperCase()]
+      );
+    }
   },
 
   /**
    * 批量更新价格
    */
-  updatePrices(prices: Map<string, number>): void {
+  updatePrices(prices: Map<string, number>, accountIds?: number[]): void {
     withTransaction(() => {
       for (const [symbol, price] of prices) {
-        run(
-          `UPDATE holdings 
-           SET last_price = ?, updated_at = datetime('now')
-           WHERE symbol = ?`,
-          [price, symbol.toUpperCase()]
-        );
+        if (accountIds && accountIds.length > 0) {
+          const placeholders = accountIds.map(() => '?').join(',');
+          run(
+            `UPDATE holdings 
+             SET last_price = ?, updated_at = datetime('now')
+             WHERE symbol = ? AND account_id IN (${placeholders})`,
+            [price, symbol.toUpperCase(), ...accountIds]
+          );
+        } else {
+          run(
+            `UPDATE holdings 
+             SET last_price = ?, updated_at = datetime('now')
+             WHERE symbol = ?`,
+            [price, symbol.toUpperCase()]
+          );
+        }
       }
     });
   },
@@ -279,15 +351,25 @@ export const holdingDao = {
   /**
    * 删除持仓
    */
-  delete(symbol: string): boolean {
-    const result = run('DELETE FROM holdings WHERE symbol = ?', [symbol.toUpperCase()]);
+  delete(symbol: string, accountId: number): boolean {
+    const result = run(
+      'DELETE FROM holdings WHERE symbol = ? AND account_id = ?',
+      [symbol.toUpperCase(), accountId]
+    );
     return result.changes > 0;
   },
 
   /**
    * 获取持仓详情视图
    */
-  getPositions(): (Holding & { market_value: number; unrealized_pnl: number; unrealized_pnl_pct: number })[] {
+  getPositions(accountIds?: number[]): (Holding & { market_value: number; unrealized_pnl: number; unrealized_pnl_pct: number })[] {
+    if (accountIds && accountIds.length > 0) {
+      const placeholders = accountIds.map(() => '?').join(',');
+      return query<Holding & { market_value: number; unrealized_pnl: number; unrealized_pnl_pct: number }>(
+        `SELECT * FROM v_positions WHERE account_id IN (${placeholders}) ORDER BY market_value DESC`,
+        accountIds
+      );
+    }
     return query<Holding & { market_value: number; unrealized_pnl: number; unrealized_pnl_pct: number }>(
       'SELECT * FROM v_positions ORDER BY market_value DESC'
     );
@@ -633,13 +715,142 @@ export const settingsDao = {
   },
 };
 
+// ==================== 账户 DAO ====================
+
+export const accountDao = {
+  /**
+   * 获取所有账户
+   */
+  getAll(): Account[] {
+    return query<Account>('SELECT * FROM accounts ORDER BY account_name ASC');
+  },
+
+  /**
+   * 根据 ID 获取账户
+   */
+  getById(id: number): Account | null {
+    return queryOne<Account>('SELECT * FROM accounts WHERE id = ?', [id]);
+  },
+
+  /**
+   * 根据名称获取账户
+   */
+  getByName(name: string): Account | null {
+    return queryOne<Account>('SELECT * FROM accounts WHERE account_name = ?', [name]);
+  },
+
+  /**
+   * 创建账户
+   */
+  create(data: CreateAccountRequest): Account {
+    const result = run(
+      `INSERT INTO accounts (account_name, account_type, notes, updated_at)
+       VALUES (?, ?, ?, datetime('now'))`,
+      [
+        data.account_name,
+        data.account_type,
+        data.notes || null,
+      ]
+    );
+
+    return this.getById(result.lastInsertRowid)!;
+  },
+
+  /**
+   * 更新账户
+   */
+  update(id: number, data: UpdateAccountRequest): Account {
+    const existing = this.getById(id);
+    if (!existing) {
+      throw new Error('账户不存在');
+    }
+
+    const updates: string[] = [];
+    const values: (string | number)[] = [];
+
+    if (data.account_name !== undefined) {
+      updates.push('account_name = ?');
+      values.push(data.account_name);
+    }
+    if (data.account_type !== undefined) {
+      updates.push('account_type = ?');
+      values.push(data.account_type);
+    }
+    if (data.notes !== undefined) {
+      updates.push('notes = ?');
+      values.push(data.notes || null);
+    }
+
+    if (updates.length === 0) {
+      return existing;
+    }
+
+    updates.push("updated_at = datetime('now')");
+    values.push(id);
+
+    const sql = `UPDATE accounts SET ${updates.join(', ')} WHERE id = ?`;
+    run(sql, values);
+
+    return this.getById(id)!;
+  },
+
+  /**
+   * 删除账户
+   */
+  delete(id: number): boolean {
+    // 检查是否有交易记录关联
+    const transactionCount = queryOne<{ count: number }>(
+      'SELECT COUNT(*) as count FROM transactions WHERE account_id = ?',
+      [id]
+    );
+    if (transactionCount && transactionCount.count > 0) {
+      throw new Error('无法删除账户：该账户下存在交易记录');
+    }
+
+    // 检查是否有持仓关联
+    const holdingCount = queryOne<{ count: number }>(
+      'SELECT COUNT(*) as count FROM holdings WHERE account_id = ?',
+      [id]
+    );
+    if (holdingCount && holdingCount.count > 0) {
+      throw new Error('无法删除账户：该账户下存在持仓');
+    }
+
+    // 检查是否有现金账户关联
+    const cashAccountCount = queryOne<{ count: number }>(
+      'SELECT COUNT(*) as count FROM cash_accounts WHERE account_id = ?',
+      [id]
+    );
+    if (cashAccountCount && cashAccountCount.count > 0) {
+      throw new Error('无法删除账户：该账户下存在现金账户');
+    }
+
+    const result = run('DELETE FROM accounts WHERE id = ?', [id]);
+    return result.changes > 0;
+  },
+
+  /**
+   * 获取默认账户（ID为1的账户）
+   */
+  getDefault(): Account | null {
+    return this.getById(1);
+  },
+};
+
 // ==================== 现金账户 DAO ====================
 
 export const cashAccountDao = {
   /**
    * 获取所有现金账户
    */
-  getAll(): CashAccount[] {
+  getAll(accountIds?: number[]): CashAccount[] {
+    if (accountIds && accountIds.length > 0) {
+      const placeholders = accountIds.map(() => '?').join(',');
+      return query<CashAccount>(
+        `SELECT * FROM cash_accounts WHERE account_id IN (${placeholders}) ORDER BY account_name ASC`,
+        accountIds
+      );
+    }
     return query<CashAccount>('SELECT * FROM cash_accounts ORDER BY account_name ASC');
   },
 
@@ -655,9 +866,10 @@ export const cashAccountDao = {
    */
   create(data: CreateCashAccountRequest): CashAccount {
     const result = run(
-      `INSERT INTO cash_accounts (account_name, amount, currency, notes, updated_at)
-       VALUES (?, ?, ?, ?, datetime('now'))`,
+      `INSERT INTO cash_accounts (account_id, account_name, amount, currency, notes, updated_at)
+       VALUES (?, ?, ?, ?, ?, datetime('now'))`,
       [
+        data.account_id,
         data.account_name,
         data.amount,
         data.currency || 'USD',
@@ -680,6 +892,10 @@ export const cashAccountDao = {
     const updates: string[] = [];
     const values: (string | number)[] = [];
 
+    if (data.account_id !== undefined) {
+      updates.push('account_id = ?');
+      values.push(data.account_id);
+    }
     if (data.account_name !== undefined) {
       updates.push('account_name = ?');
       values.push(data.account_name);
@@ -721,7 +937,15 @@ export const cashAccountDao = {
   /**
    * 获取总现金余额
    */
-  getTotalCash(): number {
+  getTotalCash(accountIds?: number[]): number {
+    if (accountIds && accountIds.length > 0) {
+      const placeholders = accountIds.map(() => '?').join(',');
+      const result = queryOne<{ total: number }>(
+        `SELECT COALESCE(SUM(amount), 0) as total FROM cash_accounts WHERE account_id IN (${placeholders})`,
+        accountIds
+      );
+      return result?.total || 0;
+    }
     const result = queryOne<{ total: number }>(
       'SELECT COALESCE(SUM(amount), 0) as total FROM cash_accounts'
     );
@@ -730,6 +954,7 @@ export const cashAccountDao = {
 };
 
 export default {
+  accountDao,
   transactionDao,
   holdingDao,
   snapshotDao,

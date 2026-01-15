@@ -9,18 +9,84 @@ import type { DailySnapshot } from '../../shared/types.js';
 export const holdingService = {
   /**
    * 获取所有持仓（含计算字段）
+   * 如果同一股票在多个账户中持有，会自动合并为一条记录
    */
-  getAllHoldings(): (Holding & { market_value: number; unrealized_pnl: number; unrealized_pnl_pct: number; weight: number })[] {
-    const positions = holdingDao.getPositions();
+  getAllHoldings(accountIds?: number[]): (Holding & { market_value: number; unrealized_pnl: number; unrealized_pnl_pct: number; weight: number })[] {
+    const positions = holdingDao.getPositions(accountIds);
+    
+    // 按股票代码分组并合并（总是合并，即使只有一个账户也可能有重复，虽然理论上不应该）
+    const mergedHoldings = new Map<string, {
+      symbol: string;
+      name: string | null;
+      total_qty: number;
+      total_cost: number; // 总成本（用于计算加权平均成本）
+      last_price: number;
+      currency: string;
+      account_ids: number[]; // 记录哪些账户持有该股票
+    }>();
+    
+    for (const pos of positions) {
+      const symbol = pos.symbol.toUpperCase();
+      const existing = mergedHoldings.get(symbol);
+      
+      if (existing) {
+        // 合并持仓
+        existing.total_qty += pos.total_qty;
+        existing.total_cost += pos.avg_cost * pos.total_qty; // 累加总成本
+        // 使用最新的价格（通常所有账户的价格应该相同）
+        if (pos.last_price > existing.last_price) {
+          existing.last_price = pos.last_price;
+        }
+        // 更新名称（使用第一个非空的名称）
+        if (!existing.name && pos.name) {
+          existing.name = pos.name;
+        }
+        // 记录账户ID
+        if (!existing.account_ids.includes(pos.account_id)) {
+          existing.account_ids.push(pos.account_id);
+        }
+      } else {
+        // 创建新的合并持仓
+        mergedHoldings.set(symbol, {
+          symbol,
+          name: pos.name,
+          total_qty: pos.total_qty,
+          total_cost: pos.avg_cost * pos.total_qty,
+          last_price: pos.last_price,
+          currency: pos.currency,
+          account_ids: [pos.account_id],
+        });
+      }
+    }
+    
+    // 转换为持仓格式并计算字段
+    const mergedPositions = Array.from(mergedHoldings.values()).map(merged => {
+      const avg_cost = merged.total_qty > 0 ? merged.total_cost / merged.total_qty : 0;
+      const market_value = merged.total_qty * merged.last_price;
+      const unrealized_pnl = market_value - merged.total_cost;
+      const unrealized_pnl_pct = merged.total_cost > 0 ? (unrealized_pnl / merged.total_cost) * 100 : 0;
+      
+      return {
+        symbol: merged.symbol,
+        account_id: merged.account_ids[0], // 使用第一个账户ID（用于兼容，实际已合并）
+        name: merged.name,
+        avg_cost,
+        total_qty: merged.total_qty,
+        last_price: merged.last_price,
+        currency: merged.currency,
+        updated_at: null,
+        market_value,
+        unrealized_pnl,
+        unrealized_pnl_pct,
+        weight: 0, // 稍后计算
+      };
+    });
     
     // 计算总市值用于权重计算
-    const totalMarketValue = positions.reduce((sum, p) => sum + (p.market_value || 0), 0);
+    const totalMarketValue = mergedPositions.reduce((sum, p) => sum + (p.market_value || 0), 0);
     
-    return positions.map(p => ({
+    return mergedPositions.map(p => ({
       ...p,
-      market_value: p.market_value || 0,
-      unrealized_pnl: p.unrealized_pnl || 0,
-      unrealized_pnl_pct: p.unrealized_pnl_pct || 0,
       weight: totalMarketValue > 0 ? (p.market_value || 0) / totalMarketValue * 100 : 0,
     }));
   },
@@ -28,8 +94,8 @@ export const holdingService = {
   /**
    * 获取单个持仓详情
    */
-  getHolding(symbol: string): Holding | null {
-    const holding = holdingDao.getBySymbol(symbol);
+  getHolding(symbol: string, accountId: number): Holding | null {
+    const holding = holdingDao.getBySymbol(symbol, accountId);
     if (!holding || holding.total_qty <= 0) {
       return null;
     }
@@ -157,11 +223,11 @@ export const holdingService = {
   /**
    * 获取持仓总览
    */
-  getOverview(): PortfolioOverview {
-    const holdings = this.getAllHoldings();
+  getOverview(accountIds?: number[]): PortfolioOverview {
+    const holdings = this.getAllHoldings(accountIds);
     
     // 获取总现金余额
-    const totalCash = cashAccountDao.getTotalCash();
+    const totalCash = cashAccountDao.getTotalCash(accountIds);
     
     const totalMarketValue = holdings.reduce((sum, h) => sum + h.market_value, 0);
     const totalAsset = totalMarketValue + totalCash;
@@ -332,9 +398,10 @@ export const holdingService = {
 
   /**
    * 获取持仓占比数据（用于饼图）
+   * 如果选择了多个账户，会自动合并同一股票的持仓
    */
-  getWeightDistribution(): { name: string; value: number; symbol: string }[] {
-    const holdings = this.getAllHoldings();
+  getWeightDistribution(accountIds?: number[]): { name: string; value: number; symbol: string }[] {
+    const holdings = this.getAllHoldings(accountIds);
     
     return holdings.map(h => ({
       name: h.name || h.symbol,
@@ -346,22 +413,22 @@ export const holdingService = {
   /**
    * 更新最新价格
    */
-  updatePrice(symbol: string, price: number): void {
-    holdingDao.updatePrice(symbol, price);
+  updatePrice(symbol: string, price: number, accountIds?: number[]): void {
+    holdingDao.updatePrice(symbol, price, accountIds);
   },
 
   /**
    * 批量更新价格
    */
-  updatePrices(prices: Map<string, number>): void {
-    holdingDao.updatePrices(prices);
+  updatePrices(prices: Map<string, number>, accountIds?: number[]): void {
+    holdingDao.updatePrices(prices, accountIds);
   },
 
   /**
    * 获取所有持仓的股票代码
    */
-  getAllSymbols(): string[] {
-    const holdings = holdingDao.getAll();
+  getAllSymbols(accountIds?: number[]): string[] {
+    const holdings = holdingDao.getAll(accountIds);
     return holdings.filter(h => h.total_qty > 0).map(h => h.symbol);
   },
 };

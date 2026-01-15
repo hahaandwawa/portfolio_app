@@ -23,7 +23,7 @@ export const transactionService = {
 
     // 卖出校验
     if (data.type === 'sell') {
-      const currentHolding = holdingDao.getBySymbol(data.symbol);
+      const currentHolding = holdingDao.getBySymbol(data.symbol, data.account_id);
       const currentQty = currentHolding?.total_qty || 0;
       
       if (data.quantity > currentQty) {
@@ -77,7 +77,7 @@ export const transactionService = {
    */
   updateHolding(data: CreateTransactionRequest): Holding {
     const symbol = data.symbol.toUpperCase();
-    const currentHolding = holdingDao.getBySymbol(symbol);
+    const currentHolding = holdingDao.getBySymbol(symbol, data.account_id);
     
     let newAvgCost: number;
     let newTotalQty: number;
@@ -105,6 +105,7 @@ export const transactionService = {
     // 更新持仓
     const holding: Omit<Holding, 'updated_at'> = {
       symbol,
+      account_id: data.account_id,
       name: data.name || currentHolding?.name || null,
       avg_cost: newAvgCost,
       total_qty: newTotalQty,
@@ -119,26 +120,32 @@ export const transactionService = {
       holdingDao.upsert({ ...holding, total_qty: 0 });
     }
 
-    return holdingDao.getBySymbol(symbol)!;
+    return holdingDao.getBySymbol(symbol, data.account_id)!;
   },
 
   /**
    * 从交易记录重新计算持仓
    * 用于数据修正或恢复
    */
-  recalculateHoldings(): Map<string, Holding> {
+  recalculateHoldings(accountIds?: number[]): Map<string, Holding> {
     const holdings = new Map<string, Holding>();
     
     // 获取所有交易，按时间顺序
     const transactions = transactionDao.getAll().reverse();
     
     for (const tx of transactions) {
-      const symbol = tx.symbol.toUpperCase();
-      let holding = holdings.get(symbol);
+      // 如果指定了账户ID列表，只处理这些账户的交易
+      if (accountIds && accountIds.length > 0 && !accountIds.includes(tx.account_id)) {
+        continue;
+      }
+      
+      const key = `${tx.symbol.toUpperCase()}_${tx.account_id}`;
+      let holding = holdings.get(key);
       
       if (!holding) {
         holding = {
-          symbol,
+          symbol: tx.symbol.toUpperCase(),
+          account_id: tx.account_id,
           name: tx.name,
           avg_cost: 0,
           total_qty: 0,
@@ -164,7 +171,7 @@ export const transactionService = {
         holding.name = tx.name;
       }
 
-      holdings.set(symbol, holding);
+      holdings.set(key, holding);
     }
 
     // 写入数据库
@@ -187,8 +194,8 @@ export const transactionService = {
   /**
    * 获取股票的所有交易
    */
-  getTransactionsBySymbol(symbol: string): Transaction[] {
-    return transactionDao.getBySymbol(symbol);
+  getTransactionsBySymbol(symbol: string, accountIds?: number[]): Transaction[] {
+    return transactionDao.getBySymbol(symbol, accountIds);
   },
 
   /**
@@ -227,11 +234,17 @@ export const transactionService = {
         
         // 重新计算相关股票的持仓
         const symbol = data.symbol?.toUpperCase() || existingTransaction.symbol;
-        const holding = this.recalculateHoldingForSymbol(symbol);
+        const accountId = data.account_id || existingTransaction.account_id;
+        const holding = this.recalculateHoldingForSymbol(symbol, accountId);
         
         // 如果股票代码改变了，也需要重新计算原股票的持仓
         if (data.symbol && data.symbol.toUpperCase() !== existingTransaction.symbol) {
-          this.recalculateHoldingForSymbol(existingTransaction.symbol);
+          this.recalculateHoldingForSymbol(existingTransaction.symbol, accountId);
+        }
+        
+        // 如果账户改变了，也需要重新计算原账户的持仓
+        if (data.account_id && data.account_id !== existingTransaction.account_id) {
+          this.recalculateHoldingForSymbol(symbol, existingTransaction.account_id);
         }
         
         if (!holding) {
@@ -287,7 +300,7 @@ export const transactionService = {
         
         try {
           // 重新计算该股票的持仓
-          this.recalculateHoldingForSymbol(transaction.symbol);
+          this.recalculateHoldingForSymbol(transaction.symbol, transaction.account_id);
         } catch (error) {
           logger.warn('重新计算持仓失败，但交易已删除', error);
           // 即使重新计算失败，交易已经删除，所以继续
@@ -317,13 +330,13 @@ export const transactionService = {
   },
 
   /**
-   * 重新计算单只股票的持仓
+   * 重新计算单只股票在指定账户的持仓
    */
-  recalculateHoldingForSymbol(symbol: string): Holding | null {
-    const transactions = transactionDao.getBySymbol(symbol);
+  recalculateHoldingForSymbol(symbol: string, accountId: number): Holding | null {
+    const transactions = transactionDao.getBySymbol(symbol, [accountId]);
     
     if (transactions.length === 0) {
-      holdingDao.delete(symbol);
+      holdingDao.delete(symbol, accountId);
       return null;
     }
 
@@ -346,10 +359,11 @@ export const transactionService = {
       currency = tx.currency;
     }
 
-    const currentHolding = holdingDao.getBySymbol(symbol);
+    const currentHolding = holdingDao.getBySymbol(symbol, accountId);
     
     const holding: Omit<Holding, 'updated_at'> = {
       symbol: symbol.toUpperCase(),
+      account_id: accountId,
       name,
       avg_cost: avgCost,
       total_qty: Math.max(0, totalQty),
@@ -358,7 +372,7 @@ export const transactionService = {
     };
 
     holdingDao.upsert(holding);
-    return holdingDao.getBySymbol(symbol);
+    return holdingDao.getBySymbol(symbol, accountId);
   },
 
   /**

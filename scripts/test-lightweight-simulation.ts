@@ -16,6 +16,7 @@ import { initDatabase, closeDatabase, getDatabase, saveDatabase } from '../app/b
 import { transactionService } from '../app/backend/services/transactionService.js';
 import { snapshotService } from '../app/backend/services/snapshotService.js';
 import { cashService } from '../app/backend/services/cashService.js';
+import { accountService } from '../app/backend/services/accountService.js';
 import { marketDataService } from '../app/backend/services/marketDataService.js';
 import { yahooProvider } from '../app/backend/providers/yahoo.js';
 import { alphaVantageProvider } from '../app/backend/providers/alphaVantage.js';
@@ -129,6 +130,10 @@ async function clearAllData() {
     console.log('  - 清空现金账户...');
     db.run('DELETE FROM cash_accounts');
     
+    console.log('  - 清空账户（保留默认账户）...');
+    // 保留ID为1的默认账户，删除其他账户
+    db.run('DELETE FROM accounts WHERE id != 1');
+    
     console.log('  - 清空汇率...');
     db.run('DELETE FROM fx_rates');
     
@@ -151,9 +156,62 @@ async function clearAllData() {
 }
 
 /**
+ * 创建测试账户
+ */
+async function createTestAccounts(): Promise<number[]> {
+  console.log('👤 创建测试账户...\n');
+  
+  const accountIds: number[] = [];
+  
+  // 确保默认账户存在
+  try {
+    const defaultAccount = accountService.getDefaultAccount();
+    if (defaultAccount) {
+      accountIds.push(defaultAccount.id);
+      console.log(`  ✅ 使用默认账户: ${defaultAccount.account_name} (ID: ${defaultAccount.id})`);
+    } else {
+      // 创建默认账户
+      const created = accountService.createAccount({
+        account_name: '默认账户',
+        account_type: 'mixed',
+      });
+      accountIds.push(created.id);
+      console.log(`  ✅ 创建默认账户: ${created.account_name} (ID: ${created.id})`);
+    }
+  } catch (error) {
+    console.error('  ❌ 创建默认账户失败:', error instanceof Error ? error.message : error);
+  }
+  
+  // 创建额外的测试账户
+  const testAccounts = [
+    { name: 'A股账户', type: 'stock' as const },
+    { name: '美股账户', type: 'stock' as const },
+    { name: '现金账户', type: 'cash' as const },
+  ];
+  
+  for (const acc of testAccounts) {
+    try {
+      const created = accountService.createAccount({
+        account_name: acc.name,
+        account_type: acc.type,
+        notes: '测试账户',
+      });
+      accountIds.push(created.id);
+      console.log(`  ✅ 创建账户: ${created.account_name} (ID: ${created.id}, 类型: ${acc.type === 'stock' ? '股票' : acc.type === 'cash' ? '现金' : '混合'})`);
+    } catch (error) {
+      console.error(`  ❌ 创建账户失败 ${acc.name}:`, error instanceof Error ? error.message : error);
+    }
+  }
+  
+  console.log(`\n✅ 账户创建完成！共 ${accountIds.length} 个账户\n`);
+  return accountIds;
+}
+
+/**
  * 生成交易记录
  */
 interface TransactionRecord {
+  account_id: number;
   symbol: string;
   name: string;
   type: 'buy' | 'sell';
@@ -164,7 +222,7 @@ interface TransactionRecord {
   trade_date: string;
 }
 
-async function generateTransactions(): Promise<TransactionRecord[]> {
+async function generateTransactions(accountIds: number[]): Promise<TransactionRecord[]> {
   console.log('📝 开始生成交易记录（最近3个月，约30笔）...\n');
   
   const transactions: TransactionRecord[] = [];
@@ -174,20 +232,39 @@ async function generateTransactions(): Promise<TransactionRecord[]> {
   const startDate = threeMonthsAgo.toISOString().split('T')[0];
   const endDate = getTodayET();
   
-  // 跟踪每只股票的持仓
-  const stockState = new Map<string, {
+  // 跟踪每只股票在每个账户的持仓
+  const stockState = new Map<string, Map<number, {
     holdings: number;
     lastTradeDate: string | null;
     stockType: 'stock' | 'etf';
-  }>();
+  }>>();
   
-  // 初始化股票状态
+  // 辅助函数：获取或创建股票状态
+  function getStockState(symbol: string, accountId: number, stockType: 'stock' | 'etf') {
+    if (!stockState.has(symbol)) {
+      stockState.set(symbol, new Map());
+    }
+    const accountMap = stockState.get(symbol)!;
+    if (!accountMap.has(accountId)) {
+      accountMap.set(accountId, {
+        holdings: 0,
+        lastTradeDate: null,
+        stockType,
+      });
+    }
+    return accountMap.get(accountId)!;
+  }
+  
+  // 辅助函数：随机选择一个账户
+  function getRandomAccountId(): number {
+    return accountIds[Math.floor(Math.random() * accountIds.length)];
+  }
+  
+  // 初始化股票状态（为每个账户初始化）
   for (const stock of STOCKS) {
-    stockState.set(stock.symbol, {
-      holdings: 0,
-      lastTradeDate: null,
-      stockType: stock.type,
-    });
+    for (const accountId of accountIds) {
+      getStockState(stock.symbol, accountId, stock.type);
+    }
   }
   
   // 生成约30笔交易
@@ -198,16 +275,19 @@ async function generateTransactions(): Promise<TransactionRecord[]> {
   console.log('📊 阶段1: 初期建仓（前1个月）...');
   const initialPeriodEnd = addBusinessDays(startDate, 20); // 约1个月
   
-  // 初期建仓：买入所有10只股票
-  for (const stock of STOCKS) {
+  // 初期建仓：买入所有10只股票（分配到不同账户）
+  for (let i = 0; i < STOCKS.length; i++) {
     if (transactionCount >= targetTransactions) break;
     
-    const state = stockState.get(stock.symbol)!;
+    const stock = STOCKS[i];
+    const accountId = accountIds[i % accountIds.length]; // 轮询分配账户
+    const state = getStockState(stock.symbol, accountId, stock.type);
     const buyDate = randomDateInRange(currentDate, initialPeriodEnd);
     const price = generatePrice(stock.basePrice);
     const quantity = generateQuantity('buy', state.stockType);
     
     transactions.push({
+      account_id: accountId,
       symbol: stock.symbol,
       name: stock.name,
       type: 'buy',
@@ -230,9 +310,10 @@ async function generateTransactions(): Promise<TransactionRecord[]> {
   console.log('📊 阶段2: 持续交易（加仓、减仓）...');
   
   while (transactionCount < targetTransactions) {
-    // 随机选择一只股票
+    // 随机选择一只股票和一个账户
     const stock = STOCKS[Math.floor(Math.random() * STOCKS.length)];
-    const state = stockState.get(stock.symbol)!;
+    const accountId = getRandomAccountId();
+    const state = getStockState(stock.symbol, accountId, stock.type);
     
     // 决定操作类型
     let action: 'buy' | 'sell';
@@ -273,6 +354,7 @@ async function generateTransactions(): Promise<TransactionRecord[]> {
     if (action === 'buy') {
       quantity = generateQuantity('buy', state.stockType);
       transactions.push({
+        account_id: accountId,
         symbol: stock.symbol,
         name: stock.name,
         type: 'buy',
@@ -295,6 +377,7 @@ async function generateTransactions(): Promise<TransactionRecord[]> {
         }
         
         transactions.push({
+          account_id: accountId,
           symbol: stock.symbol,
           name: stock.name,
           type: 'sell',
@@ -354,34 +437,47 @@ async function createTransactions(transactions: TransactionRecord[]): Promise<vo
 /**
  * 生成现金账户操作
  */
-async function generateCashAccounts(): Promise<void> {
+async function generateCashAccounts(accountIds: number[]): Promise<void> {
   console.log('💰 开始生成现金账户操作...\n');
   
-  // 创建2个现金账户
-  const accounts = [
-    { name: '主账户', amount: 15000 },
-    { name: '备用账户', amount: 5000 },
+  // 为每个账户创建现金账户（只对mixed和cash类型的账户）
+  const investmentAccounts = accountService.getAllAccounts();
+  const cashEligibleAccounts = investmentAccounts.filter(acc => 
+    acc.account_type === 'mixed' || acc.account_type === 'cash'
+  );
+  
+  if (cashEligibleAccounts.length === 0) {
+    console.log('  ⚠️  没有可用的现金账户类型，跳现金账户创建\n');
+    return;
+  }
+  
+  // 为前两个账户创建现金账户
+  const cashAccounts = [
+    { accountId: cashEligibleAccounts[0]?.id || accountIds[0], name: '主账户', amount: 15000 },
+    { accountId: cashEligibleAccounts[1]?.id || accountIds[accountIds.length > 1 ? 1 : 0], name: '备用账户', amount: 5000 },
   ];
   
-  for (const account of accounts) {
+  for (const cashAcc of cashAccounts) {
     try {
+      const account = investmentAccounts.find(a => a.id === cashAcc.accountId);
       const created = cashService.createAccount({
-        account_name: account.name,
-        amount: account.amount,
+        account_id: cashAcc.accountId,
+        account_name: cashAcc.name,
+        amount: cashAcc.amount,
         currency: 'USD',
-        notes: `初始存入 $${account.amount.toLocaleString()}`,
+        notes: `关联账户: ${account?.account_name || '未知'}, 初始存入 $${cashAcc.amount.toLocaleString()}`,
       });
-      console.log(`  ✅ 创建现金账户: ${account.name} - $${account.amount.toLocaleString()}`);
+      console.log(`  ✅ 创建现金账户: ${cashAcc.name} (关联账户: ${account?.account_name || '未知'}) - $${cashAcc.amount.toLocaleString()}`);
     } catch (error) {
-      console.error(`  ❌ 创建现金账户失败 ${account.name}:`, 
+      console.error(`  ❌ 创建现金账户失败 ${cashAcc.name}:`, 
         error instanceof Error ? error.message : error);
     }
   }
   
   // 模拟一次追加存入
-  const allAccounts = cashService.getAllAccounts();
-  if (allAccounts.length > 0) {
-    const accountToUpdate = allAccounts[0];
+  const allCashAccounts = cashService.getAllAccounts();
+  if (allCashAccounts.length > 0) {
+    const accountToUpdate = allCashAccounts[0];
     try {
       const additionalAmount = 3000;
       const newAmount = accountToUpdate.amount + additionalAmount;
@@ -410,11 +506,13 @@ function generateStatistics(transactions: TransactionRecord[]): void {
     buyCount: transactions.filter(tx => tx.type === 'buy').length,
     sellCount: transactions.filter(tx => tx.type === 'sell').length,
     stocks: new Set(transactions.map(tx => tx.symbol)).size,
+    accounts: new Set(transactions.map(tx => tx.account_id)).size,
     dateRange: {
       earliest: transactions[0]?.trade_date || 'N/A',
       latest: transactions[transactions.length - 1]?.trade_date || 'N/A',
     },
     byStock: {} as Record<string, { buy: number; sell: number; total: number }>,
+    byAccount: {} as Record<number, { buy: number; sell: number; total: number }>,
   };
   
   for (const tx of transactions) {
@@ -423,6 +521,12 @@ function generateStatistics(transactions: TransactionRecord[]): void {
     }
     stats.byStock[tx.symbol][tx.type]++;
     stats.byStock[tx.symbol].total++;
+    
+    if (!stats.byAccount[tx.account_id]) {
+      stats.byAccount[tx.account_id] = { buy: 0, sell: 0, total: 0 };
+    }
+    stats.byAccount[tx.account_id][tx.type]++;
+    stats.byAccount[tx.account_id].total++;
   }
   
   console.log('📈 交易统计:');
@@ -430,11 +534,21 @@ function generateStatistics(transactions: TransactionRecord[]): void {
   console.log(`  买入: ${stats.buyCount}`);
   console.log(`  卖出: ${stats.sellCount}`);
   console.log(`  涉及股票数: ${stats.stocks}`);
+  console.log(`  涉及账户数: ${stats.accounts}`);
   console.log(`  日期范围: ${stats.dateRange.earliest} 至 ${stats.dateRange.latest}`);
   console.log(`\n📊 各股票交易统计:`);
   
   for (const [symbol, data] of Object.entries(stats.byStock).sort((a, b) => b[1].total - a[1].total)) {
     console.log(`  ${symbol}: 买入${data.buy}笔, 卖出${data.sell}笔, 总计${data.total}笔`);
+  }
+  
+  console.log(`\n📊 各账户交易统计:`);
+  const investmentAccounts = accountService.getAllAccounts();
+  for (const [accountIdStr, data] of Object.entries(stats.byAccount).sort((a, b) => b[1].total - a[1].total)) {
+    const accountId = parseInt(accountIdStr, 10);
+    const account = investmentAccounts.find(a => a.id === accountId);
+    const accountName = account?.account_name || `账户 #${accountId}`;
+    console.log(`  ${accountName} (ID: ${accountId}): 买入${data.buy}笔, 卖出${data.sell}笔, 总计${data.total}笔`);
   }
   
   console.log('');
@@ -448,10 +562,12 @@ async function main() {
   console.log('='.repeat(60));
   console.log('📋 测试计划:');
   console.log('  1. 清空所有数据');
-  console.log('  2. 生成约30笔交易记录（最近3个月）');
-  console.log('  3. 涉及10只美股（6只个股 + 4只ETF）');
-  console.log('  4. 生成现金账户操作');
-  console.log('  5. 生成快照数据');
+  console.log('  2. 创建测试账户（默认账户 + 3个测试账户）');
+  console.log('  3. 生成约30笔交易记录（最近3个月）');
+  console.log('  4. 涉及10只美股（6只个股 + 4只ETF）');
+  console.log('  5. 交易分配到不同账户');
+  console.log('  6. 生成现金账户操作（关联到账户）');
+  console.log('  7. 生成快照数据');
   console.log('='.repeat(60));
   console.log('');
   
@@ -475,19 +591,22 @@ async function main() {
     // 1. 清空所有数据
     await clearAllData();
     
-    // 2. 生成交易记录
-    const transactions = await generateTransactions();
+    // 2. 创建测试账户
+    const accountIds = await createTestAccounts();
     
-    // 3. 创建交易记录
+    // 3. 生成交易记录
+    const transactions = await generateTransactions(accountIds);
+    
+    // 4. 创建交易记录
     await createTransactions(transactions);
     
-    // 4. 生成统计信息
+    // 5. 生成统计信息
     generateStatistics(transactions);
     
-    // 5. 生成现金账户
-    await generateCashAccounts();
+    // 6. 生成现金账户
+    await generateCashAccounts(accountIds);
     
-    // 6. 生成快照数据
+    // 7. 生成快照数据
     console.log('📸 开始生成快照数据...');
     const allTransactions = transactionDao.getAll();
     if (allTransactions.length > 0) {
@@ -515,26 +634,41 @@ async function main() {
     console.log('📊 最终数据统计:');
     const finalTransactions = transactionDao.getAll();
     
-    // 计算持仓
-    const holdingsMap = new Map<string, number>();
+    // 计算持仓（按账户和股票）
+    const holdingsMap = new Map<string, Map<number, number>>(); // symbol -> accountId -> quantity
     for (const tx of finalTransactions) {
-      const current = holdingsMap.get(tx.symbol) || 0;
+      if (!holdingsMap.has(tx.symbol)) {
+        holdingsMap.set(tx.symbol, new Map());
+      }
+      const accountMap = holdingsMap.get(tx.symbol)!;
+      const current = accountMap.get(tx.account_id) || 0;
       if (tx.type === 'buy') {
-        holdingsMap.set(tx.symbol, current + tx.quantity);
+        accountMap.set(tx.account_id, current + tx.quantity);
       } else {
-        holdingsMap.set(tx.symbol, current - tx.quantity);
+        accountMap.set(tx.account_id, current - tx.quantity);
       }
     }
     
-    const activeHoldings = Array.from(holdingsMap.values())
-      .filter(qty => qty > 0)
-      .length;
+    // 计算活跃持仓（任何账户中数量>0的股票）
+    let activeHoldings = 0;
+    for (const accountMap of holdingsMap.values()) {
+      for (const qty of accountMap.values()) {
+        if (qty > 0) {
+          activeHoldings++;
+          break; // 这只股票至少在一个账户中有持仓
+        }
+      }
+    }
     
     const uniqueStocks = new Set(finalTransactions.map(tx => tx.symbol)).size;
+    const uniqueAccounts = new Set(finalTransactions.map(tx => tx.account_id)).size;
+    const investmentAccounts = accountService.getAllAccounts();
     
     console.log(`  交易记录: ${finalTransactions.length} 笔`);
     console.log(`  涉及股票: ${uniqueStocks} 只`);
-    console.log(`  活跃持仓: ${activeHoldings} 只股票`);
+    console.log(`  涉及账户: ${uniqueAccounts} 个`);
+    console.log(`  活跃持仓: ${activeHoldings} 只股票（跨所有账户）`);
+    console.log(`  投资账户: ${investmentAccounts.length} 个`);
     console.log(`  现金账户: ${cashService.getAllAccounts().length} 个`);
     console.log(`  总现金: $${cashService.getTotalCash().toLocaleString()}`);
     console.log('');

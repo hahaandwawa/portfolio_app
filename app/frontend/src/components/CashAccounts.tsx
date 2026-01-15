@@ -1,17 +1,20 @@
 import { useState, useEffect } from 'react';
 import { Plus, Edit2, Trash2, Wallet } from 'lucide-react';
-import { cashAccountApi } from '../api';
+import { cashAccountApi, accountApi } from '../api';
 import { usePortfolioStore } from '../store';
 import { formatCurrency } from '../utils/format';
-import type { CashAccount, CreateCashAccountRequest, UpdateCashAccountRequest } from '../../../shared/types';
+import type { CashAccount, CreateCashAccountRequest, UpdateCashAccountRequest, Account } from '../../../shared/types';
 
 function CashAccounts() {
   const { fetchOverview } = usePortfolioStore();
-  const [accounts, setAccounts] = useState<CashAccount[]>([]);
+  const [cashAccounts, setCashAccounts] = useState<CashAccount[]>([]);
+  const [investmentAccounts, setInvestmentAccounts] = useState<Account[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
+  const [selectedAccountId, setSelectedAccountId] = useState<number>(1);
   const [formData, setFormData] = useState<CreateCashAccountRequest>({
+    account_id: 1,
     account_name: '',
     amount: 0,
     currency: 'USD',
@@ -23,7 +26,7 @@ function CashAccounts() {
     try {
       setIsLoading(true);
       const data = await cashAccountApi.list();
-      setAccounts(data);
+      setCashAccounts(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : '获取现金账户失败');
     } finally {
@@ -33,12 +36,22 @@ function CashAccounts() {
 
   useEffect(() => {
     fetchAccounts();
+    // 加载账户列表
+    accountApi.list().then(accs => {
+      setInvestmentAccounts(accs);
+      if (accs.length > 0) {
+        setSelectedAccountId(accs[0].id);
+        setFormData(prev => ({ ...prev, account_id: accs[0].id }));
+      }
+    }).catch(console.error);
   }, []);
 
   const handleOpenForm = (account?: CashAccount) => {
     if (account) {
       setEditingId(account.id);
+      setSelectedAccountId(account.account_id);
       setFormData({
+        account_id: account.account_id,
         account_name: account.account_name,
         amount: account.amount,
         currency: account.currency,
@@ -46,7 +59,10 @@ function CashAccounts() {
       });
     } else {
       setEditingId(null);
+      const defaultAccountId = investmentAccounts.length > 0 ? investmentAccounts[0].id : 1;
+      setSelectedAccountId(defaultAccountId);
       setFormData({
+        account_id: defaultAccountId,
         account_name: '',
         amount: 0,
         currency: 'USD',
@@ -60,7 +76,10 @@ function CashAccounts() {
   const handleCloseForm = () => {
     setIsFormOpen(false);
     setEditingId(null);
+    const defaultAccountId = investmentAccounts.length > 0 ? investmentAccounts[0].id : 1;
+    setSelectedAccountId(defaultAccountId);
     setFormData({
+      account_id: defaultAccountId,
       account_name: '',
       amount: 0,
       currency: 'USD',
@@ -75,9 +94,9 @@ function CashAccounts() {
 
     try {
       if (editingId) {
-        await cashAccountApi.update(editingId, formData);
+        await cashAccountApi.update(editingId, { ...formData, account_id: selectedAccountId });
       } else {
-        await cashAccountApi.create(formData);
+        await cashAccountApi.create({ ...formData, account_id: selectedAccountId });
       }
       await fetchAccounts();
       handleCloseForm();
@@ -105,7 +124,7 @@ function CashAccounts() {
     }
   };
 
-  const totalCash = accounts.reduce((sum, acc) => sum + acc.amount, 0);
+  const totalCash = cashAccounts.reduce((sum, acc) => sum + acc.amount, 0);
 
   if (isLoading) {
     return (
@@ -143,7 +162,7 @@ function CashAccounts() {
       )}
 
       <div className="p-5">
-        {accounts.length === 0 ? (
+        {cashAccounts.length === 0 ? (
           <div className="text-center py-12 text-slate-500 dark:text-slate-400">
             <Wallet className="w-12 h-12 mx-auto mb-3 opacity-50" />
             <p className="mb-2">暂无现金账户</p>
@@ -151,7 +170,7 @@ function CashAccounts() {
           </div>
         ) : (
           <div className="space-y-3">
-            {accounts.map((account) => (
+            {cashAccounts.map((account) => (
               <div
                 key={account.id}
                 className="flex items-center justify-between p-4 bg-slate-50 dark:bg-slate-700/50 rounded-lg border border-slate-200 dark:border-slate-600"
@@ -200,6 +219,28 @@ function CashAccounts() {
             </h3>
 
             <form onSubmit={handleSubmit} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
+                  关联账户 *
+                </label>
+                <select
+                  value={selectedAccountId}
+                  onChange={(e) => {
+                    const accountId = parseInt(e.target.value, 10);
+                    setSelectedAccountId(accountId);
+                    setFormData({ ...formData, account_id: accountId });
+                  }}
+                  className="w-full px-3 py-2 border border-slate-300 dark:border-slate-600 rounded-lg bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-100"
+                  required
+                >
+                  {investmentAccounts.map(account => (
+                    <option key={account.id} value={account.id}>
+                      {account.account_name} ({account.account_type === 'stock' ? '股票' : account.account_type === 'cash' ? '现金' : '混合'})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
               <div>
                 <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
                   账户名称 *

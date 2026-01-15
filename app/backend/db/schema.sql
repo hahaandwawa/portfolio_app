@@ -1,9 +1,20 @@
 -- Portfolio Guard 数据库 Schema
 -- SQLite 数据库设计
 
+-- 账户表
+CREATE TABLE IF NOT EXISTS accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_name TEXT NOT NULL UNIQUE,
+    account_type TEXT NOT NULL CHECK(account_type IN ('stock', 'cash', 'mixed')),
+    notes TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
 -- 交易记录表
 CREATE TABLE IF NOT EXISTS transactions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
     symbol TEXT NOT NULL,
     name TEXT,
     type TEXT NOT NULL CHECK(type IN ('buy', 'sell')),
@@ -12,18 +23,22 @@ CREATE TABLE IF NOT EXISTS transactions (
     fee REAL DEFAULT 0 CHECK(fee >= 0),
     currency TEXT DEFAULT 'USD',
     trade_date TEXT NOT NULL,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE RESTRICT
 );
 
--- 持仓表
+-- 持仓表（同一只股票可以在不同账户中持有）
 CREATE TABLE IF NOT EXISTS holdings (
-    symbol TEXT PRIMARY KEY,
+    symbol TEXT NOT NULL,
+    account_id INTEGER NOT NULL,
     name TEXT,
     avg_cost REAL NOT NULL CHECK(avg_cost >= 0),
     total_qty REAL NOT NULL CHECK(total_qty >= 0),
     last_price REAL DEFAULT 0,
     currency TEXT DEFAULT 'USD',
-    updated_at TEXT
+    updated_at TEXT,
+    PRIMARY KEY (symbol, account_id),
+    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE RESTRICT
 );
 
 -- 原始快照表（存储每次生成的快照，用于计算每日均值）
@@ -55,15 +70,17 @@ CREATE TABLE IF NOT EXISTS fx_rates (
     PRIMARY KEY(base, quote)
 );
 
--- 现金账户表
+-- 现金账户表（关联到账户表）
 CREATE TABLE IF NOT EXISTS cash_accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
     account_name TEXT NOT NULL,
     amount REAL NOT NULL DEFAULT 0,
     currency TEXT DEFAULT 'USD',
     notes TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE RESTRICT
 );
 
 -- 应用设置表
@@ -74,18 +91,23 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 
 -- 索引
+CREATE INDEX IF NOT EXISTS idx_transactions_account_id ON transactions(account_id);
 CREATE INDEX IF NOT EXISTS idx_transactions_symbol ON transactions(symbol);
 CREATE INDEX IF NOT EXISTS idx_transactions_trade_date ON transactions(trade_date);
 CREATE INDEX IF NOT EXISTS idx_transactions_type ON transactions(type);
+CREATE INDEX IF NOT EXISTS idx_holdings_account_id ON holdings(account_id);
+CREATE INDEX IF NOT EXISTS idx_holdings_symbol ON holdings(symbol);
 CREATE INDEX IF NOT EXISTS idx_daily_snapshots_date ON daily_snapshots(date);
 CREATE INDEX IF NOT EXISTS idx_raw_snapshots_date ON raw_snapshots(date);
 CREATE INDEX IF NOT EXISTS idx_raw_snapshots_timestamp ON raw_snapshots(timestamp);
+CREATE INDEX IF NOT EXISTS idx_cash_accounts_account_id ON cash_accounts(account_id);
 CREATE INDEX IF NOT EXISTS idx_cash_accounts_account_name ON cash_accounts(account_name);
 
 -- 视图：持仓详情（含计算字段）
 CREATE VIEW IF NOT EXISTS v_positions AS
 SELECT 
     h.symbol,
+    h.account_id,
     h.name,
     h.avg_cost,
     h.total_qty,
@@ -129,3 +151,7 @@ INSERT OR IGNORE INTO settings (key, value) VALUES
     ('base_currency', 'USD'),
     ('default_provider', 'yahoo'),
     ('theme', 'dark');
+
+-- 创建默认账户（如果不存在）
+INSERT OR IGNORE INTO accounts (id, account_name, account_type) VALUES 
+    (1, '默认账户', 'mixed');

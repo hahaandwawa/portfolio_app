@@ -1,3 +1,4 @@
+import { useState, useEffect } from 'react';
 import { 
   RefreshCw, 
   Settings, 
@@ -6,10 +7,12 @@ import {
   Sun, 
   Download,
   TrendingUp,
-  RotateCcw
+  RotateCcw,
+  Filter
 } from 'lucide-react';
 import { usePortfolioStore, useSettingsStore, useUIStore } from '../store';
-import { transactionApi } from '../api';
+import { transactionApi, accountApi } from '../api';
+import type { Account } from '../../../shared/types';
 
 function Header() {
   const { 
@@ -19,7 +22,14 @@ function Header() {
     isRebuildingSnapshots
   } = usePortfolioStore();
   const { theme, toggleTheme, refreshInterval } = useSettingsStore();
-  const { openTransactionForm, openSettings } = useUIStore();
+  const { openTransactionForm, openSettings, selectedAccountIds, setSelectedAccountIds } = useUIStore();
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [isAccountFilterOpen, setIsAccountFilterOpen] = useState(false);
+
+  // 加载账户列表
+  useEffect(() => {
+    accountApi.list().then(setAccounts).catch(console.error);
+  }, []);
 
   const handleRefresh = async () => {
     try {
@@ -45,6 +55,46 @@ function Header() {
     window.open(transactionApi.getExportUrl(), '_blank');
   };
 
+  const handleAccountFilterChange = (accountId: number, checked: boolean) => {
+    let newSelectedIds: number[];
+    
+    if (selectedAccountIds.length === 0) {
+      // 当前是"所有账户"状态，如果取消某个账户，则选中除了这个账户之外的所有账户
+      if (!checked) {
+        newSelectedIds = accounts.filter(acc => acc.id !== accountId).map(acc => acc.id);
+      } else {
+        // 这种情况不应该发生，因为"所有账户"时所有都是选中状态
+        newSelectedIds = [accountId];
+      }
+    } else {
+      // 当前是部分账户选中状态
+      if (checked) {
+        // 添加到选中列表
+        newSelectedIds = [...selectedAccountIds, accountId];
+      } else {
+        // 从选中列表移除
+        newSelectedIds = selectedAccountIds.filter(id => id !== accountId);
+      }
+    }
+    
+    setSelectedAccountIds(newSelectedIds);
+  };
+
+  const handleSelectAllAccounts = () => {
+    setSelectedAccountIds([]); // 空数组表示所有账户
+    setIsAccountFilterOpen(false);
+  };
+
+  const handleClearAccountFilter = () => {
+    setSelectedAccountIds([]);
+    setIsAccountFilterOpen(false);
+  };
+
+  // 判断账户是否被选中（空数组表示所有账户都被选中）
+  const isAccountSelected = (accountId: number): boolean => {
+    return selectedAccountIds.length === 0 || selectedAccountIds.includes(accountId);
+  };
+
   return (
     <header className="sticky top-0 z-50 bg-white/95 dark:bg-slate-900/95 backdrop-blur-sm border-b border-slate-200 dark:border-slate-700">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
@@ -64,6 +114,83 @@ function Header() {
 
           {/* 操作按钮 */}
           <div className="flex items-center gap-2 sm:gap-3">
+            {/* 账户筛选器 */}
+            <div className="relative">
+              <button
+                onClick={() => setIsAccountFilterOpen(!isAccountFilterOpen)}
+                className={`px-3 py-2 rounded-lg font-medium transition-all flex items-center gap-2 ${
+                  selectedAccountIds.length > 0
+                    ? 'bg-blue-500 text-white hover:bg-blue-600'
+                    : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700 hover:bg-slate-200 dark:hover:bg-slate-700'
+                }`}
+                title="筛选账户"
+              >
+                <Filter className="w-4 h-4" />
+                <span className="hidden sm:inline">
+                  {selectedAccountIds.length === 0
+                    ? '所有账户'
+                    : selectedAccountIds.length === 1
+                    ? accounts.find(a => a.id === selectedAccountIds[0])?.account_name || '1个账户'
+                    : `${selectedAccountIds.length}个账户`}
+                </span>
+              </button>
+
+              {/* 账户筛选下拉菜单 */}
+              {isAccountFilterOpen && (
+                <>
+                  <div
+                    className="fixed inset-0 z-40"
+                    onClick={() => setIsAccountFilterOpen(false)}
+                  />
+                  <div className="absolute right-0 mt-2 w-64 bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 shadow-xl z-50 max-h-96 overflow-y-auto">
+                    <div className="p-3 border-b border-slate-200 dark:border-slate-700">
+                      <div className="flex items-center justify-between mb-2">
+                        <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-100">筛选账户</h3>
+                        <button
+                          onClick={handleSelectAllAccounts}
+                          className="text-xs text-blue-500 hover:text-blue-600"
+                        >
+                          全部
+                        </button>
+                      </div>
+                      {selectedAccountIds.length > 0 && (
+                        <button
+                          onClick={handleClearAccountFilter}
+                          className="text-xs text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200"
+                        >
+                          清除筛选
+                        </button>
+                      )}
+                    </div>
+                    <div className="p-2">
+                      {accounts.map(account => {
+                        const isChecked = isAccountSelected(account.id);
+                        return (
+                          <label
+                            key={account.id}
+                            className="flex items-center gap-2 p-2 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-700/50 cursor-pointer"
+                          >
+                            <input
+                              type="checkbox"
+                              checked={isChecked}
+                              onChange={(e) => handleAccountFilterChange(account.id, e.target.checked)}
+                              className="w-4 h-4 text-blue-500 rounded focus:ring-blue-500"
+                            />
+                            <span className="text-sm text-slate-700 dark:text-slate-300">
+                              {account.account_name}
+                            </span>
+                            <span className="text-xs text-slate-500 dark:text-slate-400 ml-auto">
+                              {account.account_type === 'stock' ? '股票' : account.account_type === 'cash' ? '现金' : '混合'}
+                            </span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+
             {/* 刷新频率指示 */}
             {refreshInterval !== 'manual' && (
               <span className="hidden sm:inline text-xs text-slate-500 dark:text-slate-400 bg-slate-100 dark:bg-slate-800 px-2 py-1 rounded">

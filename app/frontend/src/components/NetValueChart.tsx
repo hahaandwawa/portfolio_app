@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import * as echarts from 'echarts';
-import { usePortfolioStore, useSettingsStore } from '../store';
-import { formatPercent } from '../utils/format';
+import { usePortfolioStore, useSettingsStore, useUIStore } from '../store';
 import { getTodayET } from '../utils/timeUtils';
 import { analyticsApi } from '../api';
 
@@ -12,6 +11,7 @@ function NetValueChart() {
   const chartInstance = useRef<echarts.ECharts | null>(null);
   const { netValueCurve, fetchNetValueCurve, isLoadingChart, transactions } = usePortfolioStore();
   const { theme } = useSettingsStore();
+  const { selectedAccountIds } = useUIStore();
   const [timeRange, setTimeRange] = useState<TimeRange>('90d');
   const [isReady, setIsReady] = useState(false);
   const [firstRecordDate, setFirstRecordDate] = useState<string | null>(null);
@@ -84,7 +84,7 @@ function NetValueChart() {
     };
   };
 
-  // 切换时间范围时重新加载数据
+  // 切换时间范围或账户筛选时重新加载数据
   useEffect(() => {
     // 如果是 'all' 且还没有第一条记录日期，等待
     if (timeRange === 'all' && !firstRecordDate) {
@@ -101,7 +101,7 @@ function NetValueChart() {
       fetchNetValueCurve(dateRange.from, dateRange.to);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [timeRange, firstRecordDate]);
+  }, [timeRange, firstRecordDate, selectedAccountIds]);
 
   // 监听总览数据、交易和现金账户变化，自动刷新净值曲线
   const { overview } = usePortfolioStore();
@@ -198,110 +198,159 @@ function NetValueChart() {
     const gridLineColor = isDark ? '#334155' : '#e2e8f0';
 
     const dates = netValueCurve.map(p => p.date);
-    const totalValues = netValueCurve.map(p => p.value);
+    
+    // 根据勾选状态决定显示哪些数据
+    // 如果只显示股票：成本 = 股票成本（不包括现金），总价值 = 股票市值
+    // 如果显示股票+现金：成本 = 股票成本 + 现金，总价值 = 股票市值 + 现金
     const stockValues = netValueCurve.map(p => p.stock_value ?? 0);
     const cashValues = netValueCurve.map(p => p.cash_value ?? 0);
-    const pnlPcts = netValueCurve.map(p => p.pnl_pct);
+    const totalValues = netValueCurve.map(p => p.value); // 总资产（股票+现金）
+    
+    // 计算成本：需要根据是否包含现金来调整
+    // 后端返回的cost已经包含了现金，所以如果只显示股票，需要减去现金部分
+    const costs = netValueCurve.map((p, index) => {
+      const totalCost = p.cost ?? 0;
+      const cashValue = cashValues[index];
+      
+      if (showStock && showCash) {
+        // 显示股票+现金：使用总成本（已包含现金）
+        return totalCost;
+      } else if (showStock) {
+        // 只显示股票：成本 = 总成本 - 现金（因为现金也是成本的一部分，但这里我们只显示股票成本）
+        // 实际上，股票成本 = 总成本 - 现金余额
+        return totalCost - cashValue;
+      } else if (showCash) {
+        // 只显示现金：成本 = 现金余额（现金本身就是成本）
+        return cashValue;
+      } else {
+        // 都不显示
+        return 0;
+      }
+    });
+    
+    // 计算总价值：根据勾选状态
+    const values = netValueCurve.map((p, index) => {
+      const stockValue = stockValues[index];
+      const cashValue = cashValues[index];
+      
+      if (showStock && showCash) {
+        return totalValues[index]; // 股票 + 现金
+      } else if (showStock) {
+        return stockValue; // 只股票
+      } else if (showCash) {
+        return cashValue; // 只现金
+      } else {
+        return 0;
+      }
+    });
 
-    // 根据勾选状态决定显示哪些数据
+    // 准备数据：成本线和总价值线
     const seriesData: any[] = [];
     
-    if (showStock && showCash) {
-      // 显示总资产（股票+现金）
-      const lastPnl = pnlPcts.length > 0 ? pnlPcts[pnlPcts.length - 1] : 0;
-      const lineColor = lastPnl >= 0 ? '#10b981' : '#ef4444';
-      const areaColor = lastPnl >= 0 
-        ? new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-            { offset: 0, color: 'rgba(16, 185, 129, 0.3)' },
-            { offset: 1, color: 'rgba(16, 185, 129, 0.02)' },
-          ])
-        : new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-            { offset: 0, color: 'rgba(239, 68, 68, 0.3)' },
-            { offset: 1, color: 'rgba(239, 68, 68, 0.02)' },
-          ]);
-      
-      seriesData.push({
-        name: '总资产',
-        type: 'line',
-        data: totalValues,
-        smooth: true,
-        symbol: 'none',
-        lineStyle: {
-          color: lineColor,
-          width: 2,
+    // 1. 成本线（虚线）- 作为堆叠的基准
+    seriesData.push({
+      name: '成本基准',
+      type: 'line',
+      data: costs,
+      smooth: true,
+      symbol: 'none',
+      lineStyle: {
+        width: 0, // 不显示线，只用于堆叠
+      },
+      stack: 'area',
+      z: 1,
+    });
+
+    // 2. 盈利区域填充（绿色，当Value > Cost时）
+    const profitDiff = values.map((value, index) => {
+      const cost = costs[index];
+      return value > cost ? value - cost : 0; // 盈利差值
+    });
+    
+    seriesData.push({
+      name: '盈利区域',
+      type: 'line',
+      data: profitDiff,
+      smooth: true,
+      symbol: 'none',
+      lineStyle: {
+        width: 0, // 不显示线
+      },
+      areaStyle: {
+        color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+          { offset: 0, color: 'rgba(16, 185, 129, 0.3)' },
+          { offset: 1, color: 'rgba(16, 185, 129, 0.05)' },
+        ]),
+      },
+      stack: 'area', // 堆叠在成本基准上
+      z: 2,
+    });
+
+    // 3. 亏损区域填充（红色，当Value < Cost时）
+    const lossDiff = values.map((value, index) => {
+      const cost = costs[index];
+      return value < cost ? value - cost : 0; // 亏损差值（负数）
+    });
+    
+    seriesData.push({
+      name: '亏损区域',
+      type: 'line',
+      data: lossDiff,
+      smooth: true,
+      symbol: 'none',
+      lineStyle: {
+        width: 0, // 不显示线
+      },
+      areaStyle: {
+        color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+          { offset: 0, color: 'rgba(239, 68, 68, 0.3)' },
+          { offset: 1, color: 'rgba(239, 68, 68, 0.05)' },
+        ]),
+      },
+      stack: 'area', // 堆叠在成本基准上
+      z: 2,
+    });
+
+    // 4. 成本线（虚线）- 显示在图表上
+    seriesData.push({
+      name: '成本',
+      type: 'line',
+      data: costs,
+      smooth: true,
+      symbol: 'none',
+      lineStyle: {
+        color: '#64748b', // 灰色虚线
+        width: 2,
+        type: 'dashed',
+      },
+      z: 3, // 确保成本线在填充区域上方
+    });
+
+    // 5. 总价值线（实线），根据盈利/亏损显示不同颜色
+    const valueData = values.map((value, index) => {
+      const cost = costs[index];
+      const isProfit = value > cost;
+      return {
+        value: value,
+        itemStyle: {
+          color: isProfit ? '#10b981' : '#ef4444', // 绿色或红色
         },
-        areaStyle: {
-          color: areaColor,
-        },
-      });
-    } else if (showStock) {
-      // 只显示股票
-      const stockPnlPcts = netValueCurve.map(p => p.stock_pnl_pct ?? 0);
-      const lastStockPnl = stockPnlPcts.length > 0 ? stockPnlPcts[stockPnlPcts.length - 1] : 0;
-      const lineColor = lastStockPnl >= 0 ? '#3b82f6' : '#ef4444';
-      const areaColor = lastStockPnl >= 0 
-        ? new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-            { offset: 0, color: 'rgba(59, 130, 246, 0.3)' },
-            { offset: 1, color: 'rgba(59, 130, 246, 0.02)' },
-          ])
-        : new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-            { offset: 0, color: 'rgba(239, 68, 68, 0.3)' },
-            { offset: 1, color: 'rgba(239, 68, 68, 0.02)' },
-          ]);
-      
-      seriesData.push({
-        name: '股票市值',
-        type: 'line',
-        data: stockValues,
-        smooth: true,
-        symbol: 'none',
-        lineStyle: {
-          color: lineColor,
-          width: 2,
-        },
-        areaStyle: {
-          color: areaColor,
-        },
-      });
-    } else if (showCash) {
-      // 只显示现金
-      const cashPnlPcts = netValueCurve.map(p => p.cash_pnl_pct ?? 0);
-      const lastCashPnl = cashPnlPcts.length > 0 ? cashPnlPcts[cashPnlPcts.length - 1] : 0;
-      const lineColor = lastCashPnl >= 0 ? '#f59e0b' : '#ef4444';
-      const areaColor = lastCashPnl >= 0 
-        ? new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-            { offset: 0, color: 'rgba(245, 158, 11, 0.3)' },
-            { offset: 1, color: 'rgba(245, 158, 11, 0.02)' },
-          ])
-        : new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-            { offset: 0, color: 'rgba(239, 68, 68, 0.3)' },
-            { offset: 1, color: 'rgba(239, 68, 68, 0.02)' },
-          ]);
-      
-      seriesData.push({
-        name: '现金余额',
-        type: 'line',
-        data: cashValues,
-        smooth: true,
-        symbol: 'none',
-        lineStyle: {
-          color: lineColor,
-          width: 2,
-        },
-        areaStyle: {
-          color: areaColor,
-        },
-      });
-    } else {
-      // 都不显示，显示空数据
-      seriesData.push({
-        name: '无数据',
-        type: 'line',
-        data: [],
-        smooth: true,
-        symbol: 'none',
-      });
-    }
+      };
+    });
+
+    seriesData.push({
+      name: '总价值',
+      type: 'line',
+      data: valueData,
+      smooth: true,
+      symbol: 'circle',
+      symbolSize: 4,
+      lineStyle: {
+        width: 2,
+        type: 'solid',
+      },
+      z: 4, // 确保总价值线在最上方
+    });
 
     const option: echarts.EChartsOption = {
       backgroundColor: 'transparent',
@@ -326,57 +375,88 @@ function NetValueChart() {
           const dataPoint = netValueCurve.find(p => p.date === date);
           if (!dataPoint) return '';
           
-          const totalValue = dataPoint.value;
+          // 根据勾选状态计算显示的值
           const stockValue = dataPoint.stock_value ?? 0;
           const cashValue = dataPoint.cash_value ?? 0;
-          const totalPnl = dataPoint.pnl_pct;
-          const stockPnl = dataPoint.stock_pnl_pct ?? 0;
-          const cashPnl = dataPoint.cash_pnl_pct ?? 0;
+          const totalValue = dataPoint.value;
+          const totalCost = dataPoint.cost ?? 0;
+          
+          // 计算当前显示的值和成本
+          let displayValue: number;
+          let displayCost: number;
+          
+          if (showStock && showCash) {
+            displayValue = totalValue;
+            displayCost = totalCost;
+          } else if (showStock) {
+            displayValue = stockValue;
+            displayCost = totalCost - cashValue; // 股票成本 = 总成本 - 现金
+          } else if (showCash) {
+            displayValue = cashValue;
+            displayCost = cashValue; // 现金成本 = 现金余额
+          } else {
+            displayValue = 0;
+            displayCost = 0;
+          }
+          
+          const profit = displayValue - displayCost;
+          const isProfit = profit >= 0;
+          
+          // 查找前一天的数据
+          const currentIndex = netValueCurve.findIndex(p => p.date === date);
+          const prevDataPoint = currentIndex > 0 ? netValueCurve[currentIndex - 1] : null;
+          
+          // 计算前一天显示的值
+          let prevDisplayValue: number | null = null;
+          if (prevDataPoint) {
+            const prevStockValue = prevDataPoint.stock_value ?? 0;
+            const prevCashValue = prevDataPoint.cash_value ?? 0;
+            
+            if (showStock && showCash) {
+              prevDisplayValue = prevDataPoint.value;
+            } else if (showStock) {
+              prevDisplayValue = prevStockValue;
+            } else if (showCash) {
+              prevDisplayValue = prevCashValue;
+            }
+          }
+          
+          const dailyChange = prevDisplayValue !== null ? displayValue - prevDisplayValue : null;
           
           let content = `
             <div style="padding: 8px;">
-              <div style="color: ${mutedColor}; margin-bottom: 8px;">${date}</div>
+              <div style="color: ${mutedColor}; margin-bottom: 8px; font-weight: 600;">${date} (ET)</div>
+              <div style="display: flex; justify-content: space-between; gap: 24px; margin-bottom: 4px;">
+                <span style="color: ${mutedColor};">成本 (Cost)</span>
+                <span style="color: ${textColor}; font-weight: 600;">$${displayCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+              </div>
+              <div style="display: flex; justify-content: space-between; gap: 24px; margin-bottom: 4px;">
+                <span style="color: ${mutedColor};">总价值 (Value)</span>
+                <span style="color: ${textColor}; font-weight: 600;">$${displayValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+              </div>
+              <div style="display: flex; justify-content: space-between; gap: 24px; margin-bottom: 4px;">
+                <span style="color: ${mutedColor};">盈利/亏损</span>
+                <span style="color: ${isProfit ? '#10b981' : '#ef4444'}; font-weight: 600;">
+                  ${isProfit ? '+' : ''}$${profit.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </span>
+              </div>
           `;
           
-          if (showStock && showCash) {
+          if (dailyChange !== null) {
+            const isDailyProfit = dailyChange >= 0;
             content += `
-              <div style="display: flex; justify-content: space-between; gap: 24px; margin-bottom: 4px;">
-                <span style="color: ${mutedColor};">总资产</span>
-                <span style="color: ${textColor}; font-weight: 600;">$${totalValue.toLocaleString()}</span>
-              </div>
-              <div style="display: flex; justify-content: space-between; gap: 24px; margin-bottom: 4px;">
-                <span style="color: ${mutedColor};">股票市值</span>
-                <span style="color: ${textColor};">$${stockValue.toLocaleString()}</span>
-              </div>
-              <div style="display: flex; justify-content: space-between; gap: 24px; margin-bottom: 4px;">
-                <span style="color: ${mutedColor};">现金余额</span>
-                <span style="color: ${textColor};">$${cashValue.toLocaleString()}</span>
-              </div>
               <div style="display: flex; justify-content: space-between; gap: 24px; margin-top: 4px;">
-                <span style="color: ${mutedColor};">累计收益</span>
-                <span style="color: ${totalPnl >= 0 ? '#10b981' : '#ef4444'}; font-weight: 600;">${totalPnl >= 0 ? '+' : ''}${totalPnl.toFixed(2)}%</span>
+                <span style="color: ${mutedColor};">当日变化</span>
+                <span style="color: ${isDailyProfit ? '#10b981' : '#ef4444'}; font-weight: 600;">
+                  ${isDailyProfit ? '+' : ''}$${dailyChange.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </span>
               </div>
             `;
-          } else if (showStock) {
+          } else {
             content += `
-              <div style="display: flex; justify-content: space-between; gap: 24px; margin-bottom: 4px;">
-                <span style="color: ${mutedColor};">股票市值</span>
-                <span style="color: ${textColor}; font-weight: 600;">$${stockValue.toLocaleString()}</span>
-              </div>
               <div style="display: flex; justify-content: space-between; gap: 24px; margin-top: 4px;">
-                <span style="color: ${mutedColor};">累计收益</span>
-                <span style="color: ${stockPnl >= 0 ? '#3b82f6' : '#ef4444'}; font-weight: 600;">${stockPnl >= 0 ? '+' : ''}${stockPnl.toFixed(2)}%</span>
-              </div>
-            `;
-          } else if (showCash) {
-            content += `
-              <div style="display: flex; justify-content: space-between; gap: 24px; margin-bottom: 4px;">
-                <span style="color: ${mutedColor};">现金余额</span>
-                <span style="color: ${textColor}; font-weight: 600;">$${cashValue.toLocaleString()}</span>
-              </div>
-              <div style="display: flex; justify-content: space-between; gap: 24px; margin-top: 4px;">
-                <span style="color: ${mutedColor};">累计收益</span>
-                <span style="color: ${cashPnl >= 0 ? '#f59e0b' : '#ef4444'}; font-weight: 600;">${cashPnl >= 0 ? '+' : ''}${cashPnl.toFixed(2)}%</span>
+                <span style="color: ${mutedColor};">当日变化</span>
+                <span style="color: ${mutedColor};">--</span>
               </div>
             `;
           }
@@ -473,27 +553,12 @@ function NetValueChart() {
     { key: 'all', label: '全部' },
   ];
 
-  // 计算统计数据
-  const stats = netValueCurve.length > 0 ? {
-    totalPnlPct: netValueCurve[netValueCurve.length - 1].pnl_pct,
-  } : null;
-
   return (
     <div className="bg-white dark:bg-slate-800 rounded-xl p-5 border border-slate-200 dark:border-slate-700 shadow-sm">
       <div className="flex flex-col gap-4 mb-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div className="flex items-center gap-4">
             <h2 className="text-lg font-semibold text-slate-800 dark:text-slate-100">净值曲线</h2>
-            {stats && (
-              <div className="flex items-center gap-3 text-sm">
-                <span className="text-slate-500 dark:text-slate-400">
-                  区间收益: 
-                  <span className={`ml-1 font-mono font-semibold ${stats.totalPnlPct >= 0 ? 'text-emerald-500' : 'text-red-500'}`}>
-                    {formatPercent(stats.totalPnlPct)}
-                  </span>
-                </span>
-              </div>
-            )}
           </div>
 
           {/* 时间范围选择 */}

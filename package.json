@@ -18,7 +18,8 @@
     "dist": "electron-builder",
     "test:lightweight": "tsx scripts/test-lightweight-simulation.ts",
     "db:init": "tsx app/backend/db/init.ts",
-    "db:clear": "tsx app/backend/db/clear.ts"
+    "db:clear": "tsx app/backend/db/clear.ts",
+    "db:migrate": "tsx app/backend/db/migrate.ts"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",

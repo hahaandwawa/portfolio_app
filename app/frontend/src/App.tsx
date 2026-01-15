@@ -8,13 +8,14 @@ import NetValueChart from './components/NetValueChart';
 import TransactionForm from './components/TransactionForm';
 import TransactionList from './components/TransactionList';
 import CashAccounts from './components/CashAccounts';
+import AccountManager from './components/AccountManager';
 import SettingsModal from './components/SettingsModal';
 import Toast from './components/Toast';
 
 function App() {
   const { refreshAll, error, clearError, isRefreshingPrices } = usePortfolioStore();
   const { fetchSettings, theme, refreshInterval } = useSettingsStore();
-  const { isTransactionFormOpen, isSettingsOpen } = useUIStore();
+  const { isTransactionFormOpen, isSettingsOpen, selectedAccountIds } = useUIStore();
   const [isInitialized, setIsInitialized] = useState(false);
 
   // 初始化加载
@@ -41,6 +42,13 @@ function App() {
       document.documentElement.classList.remove('dark');
     }
   }, [theme]);
+
+  // 监听账户筛选变化，自动刷新数据
+  useEffect(() => {
+    if (isInitialized) {
+      refreshAll().catch(console.error);
+    }
+  }, [selectedAccountIds, isInitialized, refreshAll]);
 
   // 自动刷新逻辑
   useEffect(() => {
@@ -96,6 +104,9 @@ function App() {
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
         {/* 总览卡片 */}
         <OverviewCards />
+
+        {/* 账户管理 */}
+        <AccountManager />
 
         {/* 图表区域 */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

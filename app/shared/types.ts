@@ -1,9 +1,37 @@
 // 交易类型
 export type TransactionType = 'buy' | 'sell';
 
+// 账户类型
+export type AccountType = 'stock' | 'cash' | 'mixed';
+
+// 账户
+export interface Account {
+  id: number;
+  account_name: string;
+  account_type: AccountType;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+// 创建账户请求
+export interface CreateAccountRequest {
+  account_name: string;
+  account_type: AccountType;
+  notes?: string;
+}
+
+// 更新账户请求
+export interface UpdateAccountRequest {
+  account_name?: string;
+  account_type?: AccountType;
+  notes?: string;
+}
+
 // 交易记录
 export interface Transaction {
   id: number;
+  account_id: number;
   symbol: string;
   name: string | null;
   type: TransactionType;
@@ -17,6 +45,7 @@ export interface Transaction {
 
 // 创建交易请求
 export interface CreateTransactionRequest {
+  account_id: number;
   symbol: string;
   name?: string;
   type: TransactionType;
@@ -29,6 +58,7 @@ export interface CreateTransactionRequest {
 
 // 更新交易请求
 export interface UpdateTransactionRequest {
+  account_id?: number;
   symbol?: string;
   name?: string;
   type?: TransactionType;
@@ -42,6 +72,7 @@ export interface UpdateTransactionRequest {
 // 持仓
 export interface Holding {
   symbol: string;
+  account_id: number;
   name: string | null;
   avg_cost: number;
   total_qty: number;
@@ -116,6 +147,7 @@ export interface PaginatedResponse<T> {
 export interface NetValuePoint {
   date: string;
   value: number; // 总资产（股票 + 现金）
+  cost: number; // 累计净投入（成本）
   pnl_pct: number;
   stock_value?: number; // 股票市值
   cash_value?: number; // 现金余额
@@ -148,6 +180,7 @@ export interface RefreshPricesRequest {
 
 // 交易查询参数
 export interface TransactionQuery {
+  account_ids?: number[]; // 账户ID列表，为空则查询所有账户
   symbol?: string;
   type?: TransactionType;
   from?: string;
@@ -158,6 +191,7 @@ export interface TransactionQuery {
 
 // 快照查询参数
 export interface SnapshotQuery {
+  account_ids?: number[]; // 账户ID列表，为空则查询所有账户
   from?: string;
   to?: string;
 }
@@ -165,6 +199,7 @@ export interface SnapshotQuery {
 // 现金账户
 export interface CashAccount {
   id: number;
+  account_id: number; // 关联到accounts表
   account_name: string;
   amount: number;
   currency: string;
@@ -175,6 +210,7 @@ export interface CashAccount {
 
 // 创建现金账户请求
 export interface CreateCashAccountRequest {
+  account_id: number; // 关联到accounts表
   account_name: string;
   amount: number;
   currency?: string;
@@ -183,6 +219,7 @@ export interface CreateCashAccountRequest {
 
 // 更新现金账户请求
 export interface UpdateCashAccountRequest {
+  account_id?: number;
   account_name?: string;
   amount?: number;
   currency?: string;

@@ -12,16 +12,17 @@ export const analyticsService = {
   /**
    * 获取投资组合总览
    */
-  getOverview(): PortfolioOverview {
-    return holdingService.getOverview();
+  getOverview(accountIds?: number[]): PortfolioOverview {
+    return holdingService.getOverview(accountIds);
   },
 
   /**
    * 获取净值曲线数据（自动补全缺失日期）
    * @param from 开始日期 YYYY-MM-DD
    * @param to 结束日期 YYYY-MM-DD
+   * @param accountIds 账户ID列表，为空则查询所有账户
    */
-  async getNetValueCurve(from: string, to: string): Promise<NetValuePoint[]> {
+  async getNetValueCurve(from: string, to: string, accountIds?: number[]): Promise<NetValuePoint[]> {
     // 获取第一条股票交易记录的日期
     const firstTransactionDate = this.getFirstRecordDate();
     if (!firstTransactionDate) {
@@ -39,11 +40,11 @@ export const analyticsService = {
     const snapshots = snapshotDao.getRange(safeFrom, to);
     
     // 获取所有持仓
-    const holdings = holdingService.getAllHoldings();
+    const holdings = holdingService.getAllHoldings(accountIds);
     if (holdings.length === 0 && snapshots.length === 0) {
       // 如果没有任何快照，但请求的日期早于第一条交易日期，返回0值点
       if (from < firstTransactionDate) {
-        return this.convertSnapshotsToNetValuePoints([], from, firstTransactionDate);
+        return this.convertSnapshotsToNetValuePoints([], from, firstTransactionDate, accountIds);
       }
       return [];
     }
@@ -54,16 +55,16 @@ export const analyticsService = {
     // 如果有缺失的日期，尝试从API获取并补全
     if (missingDates.length > 0 && holdings.length > 0) {
       console.log(`发现 ${missingDates.length} 个缺失的交易日，开始自动补全...`);
-      await this.fillMissingSnapshots(missingDates, holdings);
+      await this.fillMissingSnapshots(missingDates, holdings, accountIds);
       
       // 重新获取快照数据
       const updatedSnapshots = snapshotDao.getRange(safeFrom, to);
-      return this.convertSnapshotsToNetValuePoints(updatedSnapshots, from, firstTransactionDate);
+      return this.convertSnapshotsToNetValuePoints(updatedSnapshots, from, firstTransactionDate, accountIds);
     }
     
     // 传入原始请求的 from 和第一条交易记录日期，用于填充0值
     // convertSnapshotsToNetValuePoints 会过滤掉所有早于第一条交易日期的快照
-    return this.convertSnapshotsToNetValuePoints(snapshots, from, firstTransactionDate);
+    return this.convertSnapshotsToNetValuePoints(snapshots, from, firstTransactionDate, accountIds);
   },
 
   /**
@@ -136,11 +137,13 @@ export const analyticsService = {
    * @param snapshots 快照数据
    * @param requestedFrom 用户请求的开始日期
    * @param firstRecordDate 第一条记录的日期
+   * @param accountIds 账户ID列表，为空则查询所有账户
    */
   convertSnapshotsToNetValuePoints(
     snapshots: Array<{ date: string; total_market_value: number; cash_balance: number }>,
     requestedFrom?: string,
-    firstRecordDate?: string | null
+    firstRecordDate?: string | null,
+    accountIds?: number[]
   ): NetValuePoint[] {
     const result: NetValuePoint[] = [];
     
@@ -189,6 +192,7 @@ export const analyticsService = {
           result.push({
             date: current.toISOString().split('T')[0],
             value: 0,
+            cost: 0,
             pnl_pct: 0,
             stock_value: 0,
             cash_value: 0,
@@ -207,9 +211,11 @@ export const analyticsService = {
       if (firstRecordDate && today >= firstRecordDate) {
         // 使用当前总资产作为今天的净值
         const todayValue = currentTotalAsset;
+        const todayCost = this.calculateCostAtDate(today, accountIds);
         result.push({
           date: today,
           value: todayValue,
+          cost: todayCost,
           pnl_pct: 0, // 因为没有基准，盈亏百分比设为0
           stock_value: currentMarketValue,
           cash_value: currentCash,
@@ -243,6 +249,9 @@ export const analyticsService = {
       const stockValue = s.total_market_value;
       const cashValue = s.cash_balance || 0;
       
+      // 计算该日期的累计净投入（成本）
+      const cost = this.calculateCostAtDate(s.date, accountIds);
+      
       // 关键修复：收益百分比只计算股票的增值部分（市值 - 成本），不包含现金
       // 对于每个时间点，都需要计算该时间点的股票成本
       // 收益 = (当前股票市值 - 当前股票成本) / 基准股票成本 * 100
@@ -266,6 +275,7 @@ export const analyticsService = {
       return {
         date: s.date,
         value: totalValue,
+        cost: cost,
         pnl_pct: pnlPct,
         stock_value: stockValue,
         cash_value: cashValue,
@@ -284,6 +294,7 @@ export const analyticsService = {
       const todayValue = currentTotalAsset;
       const todayStockValue = currentMarketValue;
       const todayCashValue = currentCash;
+      const todayCost = this.calculateCostAtDate(today, accountIds);
       
       // 关键修复：收益百分比只计算股票的增值部分（市值 - 成本），不包含现金
       // 计算今天的股票成本
@@ -307,6 +318,7 @@ export const analyticsService = {
         snapshotPoints[todayIndex] = {
           date: today,
           value: todayValue,
+          cost: todayCost,
           pnl_pct: todayPnlPct,
           stock_value: todayStockValue,
           cash_value: todayCashValue,
@@ -318,6 +330,7 @@ export const analyticsService = {
         snapshotPoints.push({
           date: today,
           value: todayValue,
+          cost: todayCost,
           pnl_pct: todayPnlPct,
           stock_value: todayStockValue,
           cash_value: todayCashValue,
@@ -421,9 +434,11 @@ export const analyticsService = {
    * - 如果账户在指定日期或之前创建，且更新日期不晚于指定日期，使用当前金额
    * - 如果账户在指定日期之后创建，不计入
    * - 如果账户在指定日期之前创建，但更新日期晚于指定日期，使用当前金额（可能不准确）
+   * @param date 日期字符串 (YYYY-MM-DD)
+   * @param accountIds 账户ID列表，为空则查询所有账户
    */
-  calculateCashAtDate(date: string): number {
-    const cashAccounts = cashAccountDao.getAll();
+  calculateCashAtDate(date: string, accountIds?: number[]): number {
+    const cashAccounts = cashAccountDao.getAll(accountIds);
     const today = getTodayET();
     
     // 如果查询的是未来日期，返回0
@@ -453,9 +468,61 @@ export const analyticsService = {
   },
 
   /**
-   * 补全缺失的快照数据
+   * 计算指定日期的累计净投入（成本）
+   * 成本 = 所有买入交易的总金额（价格 × 数量 + 手续费）- 所有卖出交易的总金额（价格 × 数量）+ 现金账户余额
+   * 
+   * 说明：
+   * - 买入：投入了钱，增加成本
+   * - 卖出：收回了钱，减少成本
+   * - 现金账户余额：代表实际投入的现金（包括直接存入的现金和卖出股票得到的现金）
+   *   由于无法区分现金的来源，我们采用：成本 = 买入总额 - 卖出总额 + 现金余额
+   *   这样，如果现金是通过卖出股票得到的，卖出减少了成本，现金增加了成本，两者抵消，结果是正确的
+   *   如果现金是直接存入的，现金增加了成本，这也是正确的
+   * 
+   * @param date 日期字符串 (YYYY-MM-DD)
+   * @param accountIds 账户ID列表，为空则查询所有账户
    */
-  async fillMissingSnapshots(missingDates: string[], holdings: ReturnType<typeof holdingService.getAllHoldings>): Promise<void> {
+  calculateCostAtDate(date: string, accountIds?: number[]): number {
+    const allTransactions = transactionDao.getAll();
+    
+    // 过滤出指定日期及之前的交易
+    let transactionsUpToDate = allTransactions.filter((tx) => tx.trade_date <= date);
+    
+    // 如果指定了账户ID列表，只处理这些账户的交易
+    if (accountIds && accountIds.length > 0) {
+      transactionsUpToDate = transactionsUpToDate.filter(tx => accountIds.includes(tx.account_id));
+    }
+    
+    // 按交易日期排序（从早到晚）
+    transactionsUpToDate.sort((a, b) => a.trade_date.localeCompare(b.trade_date));
+    
+    let totalCost = 0;
+    
+    // 计算所有买入和卖出交易的成本
+    for (const tx of transactionsUpToDate) {
+      if (tx.type === 'buy') {
+        // 买入：增加成本（价格 × 数量 + 手续费）
+        totalCost += tx.price * tx.quantity + tx.fee;
+      } else if (tx.type === 'sell') {
+        // 卖出：减少成本（价格 × 数量，不包括手续费，因为手续费是成本的一部分）
+        totalCost -= tx.price * tx.quantity;
+      }
+    }
+    
+    // 加上现金账户的余额（现金余额代表实际投入的现金）
+    const cashAtDate = this.calculateCashAtDate(date, accountIds);
+    totalCost += cashAtDate;
+    
+    return totalCost;
+  },
+
+  /**
+   * 补全缺失的快照数据
+   * @param missingDates 缺失的日期列表
+   * @param holdings 持仓列表
+   * @param accountIds 账户ID列表，为空则查询所有账户
+   */
+  async fillMissingSnapshots(missingDates: string[], holdings: ReturnType<typeof holdingService.getAllHoldings>, accountIds?: number[]): Promise<void> {
     for (const date of missingDates) {
       try {
         console.log(`正在补全 ${date} 的快照数据...`);
@@ -656,7 +723,7 @@ export const analyticsService = {
         }
         
         // 计算该日期的现金余额（基于现金账户创建时间）
-        const totalCash = this.calculateCashAtDate(date);
+        const totalCash = this.calculateCashAtDate(date, accountIds);
         
         // 保存原始快照
         const rawSnapshot = {

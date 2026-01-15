@@ -1,8 +1,9 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Trash2, Edit2, ChevronLeft, ChevronRight, ArrowDown, ArrowUp } from 'lucide-react';
 import { usePortfolioStore } from '../store';
+import { accountApi } from '../api';
 import { formatCurrency, formatNumber } from '../utils/format';
-import type { Transaction, UpdateTransactionRequest } from '../../../shared/types';
+import type { Transaction, UpdateTransactionRequest, Account } from '../../../shared/types';
 
 const PAGE_SIZE = 10;
 
@@ -12,6 +13,23 @@ function TransactionList() {
   const [deletingId, setDeletingId] = useState<number | null>(null);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editForm, setEditForm] = useState<Partial<UpdateTransactionRequest>>({});
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [accountMap, setAccountMap] = useState<Map<number, Account>>(new Map());
+
+  // 加载账户列表
+  useEffect(() => {
+    accountApi.list().then(accs => {
+      setAccounts(accs);
+      const map = new Map<number, Account>();
+      accs.forEach(acc => map.set(acc.id, acc));
+      setAccountMap(map);
+    }).catch(console.error);
+  }, []);
+
+  // 获取账户名称
+  const getAccountName = (accountId: number): string => {
+    return accountMap.get(accountId)?.account_name || `账户 #${accountId}`;
+  };
 
   const totalPages = Math.ceil(transactionsTotal / PAGE_SIZE);
 
@@ -24,6 +42,7 @@ function TransactionList() {
   const handleEdit = (tx: Transaction) => {
     setEditingId(tx.id);
     setEditForm({
+      account_id: tx.account_id,
       symbol: tx.symbol,
       name: tx.name || undefined,
       type: tx.type,
@@ -97,10 +116,11 @@ function TransactionList() {
       ) : (
         <>
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[700px]">
+            <table className="w-full min-w-[900px]">
               <thead>
                 <tr className="border-b border-slate-200 dark:border-slate-700">
                   <th className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 py-3 px-4 text-left">日期</th>
+                  <th className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 py-3 px-4 text-left">账户</th>
                   <th className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 py-3 px-4 text-left">代码/名称</th>
                   <th className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 py-3 px-4 text-left">类型</th>
                   <th className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 py-3 px-4 text-right">价格</th>
@@ -132,6 +152,27 @@ function TransactionList() {
                           />
                         ) : (
                           tx.trade_date
+                        )}
+                      </td>
+
+                      {/* 账户 */}
+                      <td className="py-3 px-4">
+                        {editingId === tx.id ? (
+                          <select
+                            value={editForm.account_id ?? tx.account_id}
+                            onChange={(e) => setEditForm({ ...editForm, account_id: parseInt(e.target.value, 10) })}
+                            className="w-full px-2 py-1 text-sm border border-slate-300 dark:border-slate-600 rounded bg-white dark:bg-slate-700"
+                          >
+                            {accounts.map(acc => (
+                              <option key={acc.id} value={acc.id}>
+                                {acc.account_name}
+                              </option>
+                            ))}
+                          </select>
+                        ) : (
+                          <span className="text-sm text-slate-700 dark:text-slate-300">
+                            {getAccountName(tx.account_id)}
+                          </span>
                         )}
                       </td>
 

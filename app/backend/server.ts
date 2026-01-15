@@ -7,6 +7,7 @@ import { marketDataService } from './services/marketDataService.js';
 import { analyticsService } from './services/analyticsService.js';
 import { snapshotService } from './services/snapshotService.js';
 import { cashService } from './services/cashService.js';
+import { accountService } from './services/accountService.js';
 import { settingsDao } from './db/dao.js';
 import { yahooProvider } from './providers/yahoo.js';
 import { alphaVantageProvider } from './providers/alphaVantage.js';
@@ -19,6 +20,8 @@ import type {
   SnapshotQuery,
   CreateCashAccountRequest,
   UpdateCashAccountRequest,
+  CreateAccountRequest,
+  UpdateAccountRequest,
 } from '../shared/types.js';
 
 // 创建 Fastify 实例
@@ -73,7 +76,12 @@ fastify.post<{ Body: CreateTransactionRequest }>('/api/transactions', async (req
 
 // 查询交易列表
 fastify.get<{ Querystring: TransactionQuery }>('/api/transactions', async (request, reply) => {
-  const result = transactionService.queryTransactions(request.query);
+  // 处理account_ids参数（可能是逗号分隔的字符串）
+  const query = { ...request.query };
+  if (query.account_ids && typeof query.account_ids === 'string') {
+    query.account_ids = query.account_ids.split(',').map(id => parseInt(id, 10)).filter(id => !isNaN(id));
+  }
+  const result = transactionService.queryTransactions(query);
   return {
     success: true,
     data: result,
@@ -230,8 +238,12 @@ fastify.get('/api/export/transactions.csv', async (request, reply) => {
 // ==================== 持仓 API ====================
 
 // 获取所有持仓
-fastify.get('/api/holdings', async (request, reply) => {
-  const holdings = holdingService.getAllHoldings();
+fastify.get<{ Querystring: { account_ids?: string } }>('/api/holdings', async (request, reply) => {
+  let accountIds: number[] | undefined;
+  if (request.query.account_ids) {
+    accountIds = request.query.account_ids.split(',').map(id => parseInt(id, 10)).filter(id => !isNaN(id));
+  }
+  const holdings = holdingService.getAllHoldings(accountIds);
   return {
     success: true,
     data: holdings,
@@ -239,8 +251,12 @@ fastify.get('/api/holdings', async (request, reply) => {
 });
 
 // 获取持仓占比分布
-fastify.get('/api/holdings/distribution', async (request, reply) => {
-  const distribution = holdingService.getWeightDistribution();
+fastify.get<{ Querystring: { account_ids?: string } }>('/api/holdings/distribution', async (request, reply) => {
+  let accountIds: number[] | undefined;
+  if (request.query.account_ids) {
+    accountIds = request.query.account_ids.split(',').map(id => parseInt(id, 10)).filter(id => !isNaN(id));
+  }
+  const distribution = holdingService.getWeightDistribution(accountIds);
   return {
     success: true,
     data: distribution,
@@ -281,8 +297,12 @@ fastify.get<{ Params: { symbol: string }; Querystring: { provider?: string } }>(
 // ==================== 分析 API ====================
 
 // 获取总览
-fastify.get('/api/analytics/overview', async (request, reply) => {
-  const overview = analyticsService.getOverview();
+fastify.get<{ Querystring: { account_ids?: string } }>('/api/analytics/overview', async (request, reply) => {
+  let accountIds: number[] | undefined;
+  if (request.query.account_ids) {
+    accountIds = request.query.account_ids.split(',').map(id => parseInt(id, 10)).filter(id => !isNaN(id));
+  }
+  const overview = analyticsService.getOverview(accountIds);
   return {
     success: true,
     data: overview,
@@ -310,7 +330,13 @@ fastify.get('/api/analytics/first-record-date', async (request, reply) => {
 // 获取快照/净值曲线
 fastify.get<{ Querystring: SnapshotQuery }>('/api/analytics/snapshots', async (request, reply) => {
   try {
-    const { from, to } = request.query;
+    const { from, to, account_ids } = request.query;
+    
+    // 处理account_ids参数
+    let accountIds: number[] | undefined;
+    if (account_ids && typeof account_ids === 'string') {
+      accountIds = account_ids.split(',').map(id => parseInt(id, 10)).filter(id => !isNaN(id));
+    }
     
     // 获取第一条记录的日期
     const firstRecordDate = analyticsService.getFirstRecordDate();
@@ -330,7 +356,7 @@ fastify.get<{ Querystring: SnapshotQuery }>('/api/analytics/snapshots', async (r
       }
     }
     
-    const curve = await analyticsService.getNetValueCurve(fromDate, toDate);
+    const curve = await analyticsService.getNetValueCurve(fromDate, toDate, accountIds);
     return {
       success: true,
       data: curve,
@@ -447,12 +473,118 @@ fastify.post('/api/snapshots/rebuild', async (request, reply) => {
   }
 });
 
+// ==================== 账户 API ====================
+
+// 获取所有账户
+fastify.get('/api/accounts', async (request, reply) => {
+  try {
+    const accounts = accountService.getAllAccounts();
+    return {
+      success: true,
+      data: accounts,
+    };
+  } catch (error) {
+    fastify.log.error(error);
+    reply.status(500).send({
+      success: false,
+      error: error instanceof Error ? error.message : '获取账户失败',
+      code: 500,
+    });
+  }
+});
+
+// 创建账户
+fastify.post<{ Body: CreateAccountRequest }>('/api/accounts', async (request, reply) => {
+  try {
+    const account = accountService.createAccount(request.body);
+    return {
+      success: true,
+      data: account,
+    };
+  } catch (error) {
+    fastify.log.error(error);
+    reply.status(400).send({
+      success: false,
+      error: error instanceof Error ? error.message : '创建账户失败',
+      code: 400,
+    });
+  }
+});
+
+// 更新账户
+fastify.put<{ Params: { id: string }; Body: UpdateAccountRequest }>('/api/accounts/:id', async (request, reply) => {
+  try {
+    const id = parseInt(request.params.id, 10);
+    if (isNaN(id)) {
+      reply.status(400).send({
+        success: false,
+        error: '无效的账户ID',
+        code: 400,
+      });
+      return;
+    }
+    
+    const account = accountService.updateAccount(id, request.body);
+    return {
+      success: true,
+      data: account,
+    };
+  } catch (error) {
+    fastify.log.error(error);
+    reply.status(400).send({
+      success: false,
+      error: error instanceof Error ? error.message : '更新账户失败',
+      code: 400,
+    });
+  }
+});
+
+// 删除账户
+fastify.delete<{ Params: { id: string } }>('/api/accounts/:id', async (request, reply) => {
+  try {
+    const id = parseInt(request.params.id, 10);
+    if (isNaN(id)) {
+      reply.status(400).send({
+        success: false,
+        error: '无效的账户ID',
+        code: 400,
+      });
+      return;
+    }
+    
+    const deleted = accountService.deleteAccount(id);
+    if (!deleted) {
+      reply.status(404).send({
+        success: false,
+        error: '账户不存在',
+        code: 404,
+      });
+      return;
+    }
+    
+    return {
+      success: true,
+    };
+  } catch (error) {
+    fastify.log.error(error);
+    reply.status(400).send({
+      success: false,
+      error: error instanceof Error ? error.message : '删除账户失败',
+      code: 400,
+    });
+  }
+});
+
 // ==================== 现金账户 API ====================
 
 // 获取所有现金账户
-fastify.get('/api/cash-accounts', async (request, reply) => {
+fastify.get<{ Querystring: { account_ids?: string } }>('/api/cash-accounts', async (request, reply) => {
   try {
-    const accounts = cashService.getAllAccounts();
+    let accountIds: number[] | undefined;
+    if (request.query.account_ids) {
+      accountIds = request.query.account_ids.split(',').map(id => parseInt(id, 10)).filter(id => !isNaN(id));
+    }
+    const accounts = cashService.getAllAccounts(accountIds);
     return {
       success: true,
       data: accounts,

@@ -47,6 +47,79 @@ export async function initDatabase(customPath?: string): Promise<SqlJsDatabase> 
     db = new SQL.Database();
   }
 
+  // 如果数据库已存在，先运行迁移（添加新列等）
+  if (existsSync(dbPath)) {
+    try {
+      // 检查是否需要迁移（检查是否有transactions表但没有account_id列）
+      const hasTransactions = db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='transactions'");
+      if (hasTransactions.length > 0 && hasTransactions[0].values.length > 0) {
+        // 检查account_id列是否存在
+        const tableInfo = db.exec("PRAGMA table_info(transactions)");
+        const hasAccountId = tableInfo.length > 0 && 
+          tableInfo[0].values.some((col: unknown[]) => col[1] === 'account_id');
+        
+        if (!hasAccountId) {
+          console.log('检测到需要数据库迁移，正在执行...');
+          // 运行迁移逻辑（简化版，只添加必要的列）
+          try {
+            // 创建accounts表（如果不存在）
+            db.run(`
+              CREATE TABLE IF NOT EXISTS accounts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_name TEXT NOT NULL UNIQUE,
+                account_type TEXT NOT NULL CHECK(account_type IN ('stock', 'cash', 'mixed')),
+                notes TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+              )
+            `);
+            db.run(`INSERT OR IGNORE INTO accounts (id, account_name, account_type) VALUES (1, '默认账户', 'mixed')`);
+            
+            // 添加account_id列
+            db.run(`ALTER TABLE transactions ADD COLUMN account_id INTEGER DEFAULT 1`);
+            db.run(`UPDATE transactions SET account_id = 1 WHERE account_id IS NULL`);
+            
+            // 重建holdings表
+            const holdingsExists = db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='holdings'");
+            if (holdingsExists.length > 0 && holdingsExists[0].values.length > 0) {
+              db.run(`CREATE TABLE holdings_new (
+                symbol TEXT NOT NULL,
+                account_id INTEGER NOT NULL DEFAULT 1,
+                name TEXT,
+                avg_cost REAL NOT NULL CHECK(avg_cost >= 0),
+                total_qty REAL NOT NULL CHECK(total_qty >= 0),
+                last_price REAL DEFAULT 0,
+                currency TEXT DEFAULT 'USD',
+                updated_at TEXT,
+                PRIMARY KEY (symbol, account_id)
+              )`);
+              db.run(`INSERT INTO holdings_new SELECT symbol, 1, name, avg_cost, total_qty, last_price, currency, updated_at FROM holdings`);
+              db.run(`DROP TABLE holdings`);
+              db.run(`ALTER TABLE holdings_new RENAME TO holdings`);
+            }
+            
+            // 添加cash_accounts的account_id
+            db.run(`ALTER TABLE cash_accounts ADD COLUMN account_id INTEGER DEFAULT 1`);
+            db.run(`UPDATE cash_accounts SET account_id = 1 WHERE account_id IS NULL`);
+            
+            // 创建索引
+            db.run(`CREATE INDEX IF NOT EXISTS idx_transactions_account_id ON transactions(account_id)`);
+            db.run(`CREATE INDEX IF NOT EXISTS idx_holdings_account_id ON holdings(account_id)`);
+            db.run(`CREATE INDEX IF NOT EXISTS idx_cash_accounts_account_id ON cash_accounts(account_id)`);
+            
+            console.log('数据库迁移完成');
+            saveDatabase();
+          } catch (migrateError) {
+            console.warn('自动迁移失败，请手动运行 npm run db:migrate:', migrateError);
+          }
+        }
+      }
+    } catch (error) {
+      // 迁移检查失败不影响初始化
+      console.warn('迁移检查失败:', error);
+    }
+  }
+
   // 执行 schema 初始化（即使数据库已存在，也会执行 CREATE TABLE IF NOT EXISTS）
   const schemaPath = join(__dirname, 'schema.sql');
   const schema = readFileSync(schemaPath, 'utf-8');
@@ -57,7 +130,7 @@ export async function initDatabase(customPath?: string): Promise<SqlJsDatabase> 
   } catch (error) {
     console.error('执行数据库schema失败:', error);
     // 即使出错也继续，因为可能是表已存在
-    if (error instanceof Error && !error.message.includes('already exists')) {
+    if (error instanceof Error && !error.message.includes('already exists') && !error.message.includes('duplicate column')) {
       throw error;
     }
   }

@@ -13,6 +13,9 @@ import type {
   CashAccount,
   CreateCashAccountRequest,
   UpdateCashAccountRequest,
+  Account,
+  CreateAccountRequest,
+  UpdateAccountRequest,
 } from '../../../shared/types';
 
 const API_BASE = '/api';
@@ -69,6 +72,9 @@ export const transactionApi = {
    */
   async list(params?: TransactionQuery): Promise<{ items: Transaction[]; total: number }> {
     const searchParams = new URLSearchParams();
+    if (params?.account_ids && params.account_ids.length > 0) {
+      searchParams.set('account_ids', params.account_ids.join(','));
+    }
     if (params?.symbol) searchParams.set('symbol', params.symbol);
     if (params?.type) searchParams.set('type', params.type);
     if (params?.from) searchParams.set('from', params.from);
@@ -113,15 +119,25 @@ export const holdingApi = {
   /**
    * 获取所有持仓
    */
-  async list(): Promise<(Holding & { market_value: number; unrealized_pnl: number; unrealized_pnl_pct: number; weight: number })[]> {
-    return request('/holdings');
+  async list(accountIds?: number[]): Promise<(Holding & { market_value: number; unrealized_pnl: number; unrealized_pnl_pct: number; weight: number })[]> {
+    const searchParams = new URLSearchParams();
+    if (accountIds && accountIds.length > 0) {
+      searchParams.set('account_ids', accountIds.join(','));
+    }
+    const query = searchParams.toString();
+    return request(`/holdings${query ? `?${query}` : ''}`);
   },
 
   /**
    * 获取持仓分布
    */
-  async distribution(): Promise<{ name: string; value: number; symbol: string }[]> {
-    return request('/holdings/distribution');
+  async distribution(accountIds?: number[]): Promise<{ name: string; value: number; symbol: string }[]> {
+    const searchParams = new URLSearchParams();
+    if (accountIds && accountIds.length > 0) {
+      searchParams.set('account_ids', accountIds.join(','));
+    }
+    const query = searchParams.toString();
+    return request(`/holdings/distribution${query ? `?${query}` : ''}`);
   },
 };
 
@@ -152,8 +168,13 @@ export const analyticsApi = {
   /**
    * 获取总览
    */
-  async getOverview(): Promise<PortfolioOverview> {
-    return request('/analytics/overview');
+  async getOverview(accountIds?: number[]): Promise<PortfolioOverview> {
+    const searchParams = new URLSearchParams();
+    if (accountIds && accountIds.length > 0) {
+      searchParams.set('account_ids', accountIds.join(','));
+    }
+    const query = searchParams.toString();
+    return request(`/analytics/overview${query ? `?${query}` : ''}`);
   },
 
   /**
@@ -167,10 +188,13 @@ export const analyticsApi = {
    * 获取净值曲线
    * 添加时间戳参数确保每次请求都获取最新数据（避免浏览器缓存）
    */
-  async getSnapshots(from?: string, to?: string): Promise<NetValuePoint[]> {
+  async getSnapshots(from?: string, to?: string, accountIds?: number[]): Promise<NetValuePoint[]> {
     const params = new URLSearchParams();
     if (from) params.set('from', from);
     if (to) params.set('to', to);
+    if (accountIds && accountIds.length > 0) {
+      params.set('account_ids', accountIds.join(','));
+    }
     // 添加时间戳确保每次都是新请求，避免缓存
     params.set('_t', Date.now().toString());
     const query = params.toString();
@@ -246,12 +270,59 @@ export const settingsApi = {
 
 // ==================== 现金账户 API ====================
 
+// ==================== 账户 API ====================
+
+export const accountApi = {
+  /**
+   * 获取所有账户
+   */
+  async list(): Promise<Account[]> {
+    return request('/accounts');
+  },
+
+  /**
+   * 创建账户
+   */
+  async create(data: CreateAccountRequest): Promise<Account> {
+    return request('/accounts', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  },
+
+  /**
+   * 更新账户
+   */
+  async update(id: number, data: UpdateAccountRequest): Promise<Account> {
+    return request(`/accounts/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    });
+  },
+
+  /**
+   * 删除账户
+   */
+  async delete(id: number): Promise<void> {
+    await request(`/accounts/${id}`, {
+      method: 'DELETE',
+    });
+  },
+};
+
+// ==================== 现金账户 API ====================
+
 export const cashAccountApi = {
   /**
    * 获取所有现金账户
    */
-  async list(): Promise<CashAccount[]> {
-    return request('/cash-accounts');
+  async list(accountIds?: number[]): Promise<CashAccount[]> {
+    const searchParams = new URLSearchParams();
+    if (accountIds && accountIds.length > 0) {
+      searchParams.set('account_ids', accountIds.join(','));
+    }
+    const query = searchParams.toString();
+    return request(`/cash-accounts${query ? `?${query}` : ''}`);
   },
 
   /**
@@ -293,6 +364,7 @@ export const healthApi = {
 };
 
 export default {
+  account: accountApi,
   transaction: transactionApi,
   holding: holdingApi,
   market: marketApi,

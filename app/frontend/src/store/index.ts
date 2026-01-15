@@ -68,7 +68,8 @@ export const usePortfolioStore = create<PortfolioState>((set, get) => ({
   fetchHoldings: async () => {
     set({ isLoadingHoldings: true, error: null });
     try {
-      const holdings = await holdingApi.list();
+      const accountIds = useUIStore.getState().selectedAccountIds;
+      const holdings = await holdingApi.list(accountIds.length > 0 ? accountIds : undefined);
       set({ holdings, isLoadingHoldings: false });
     } catch (error) {
       set({ 
@@ -81,7 +82,8 @@ export const usePortfolioStore = create<PortfolioState>((set, get) => ({
   fetchOverview: async () => {
     set({ isLoadingOverview: true, error: null });
     try {
-      const overview = await analyticsApi.getOverview();
+      const accountIds = useUIStore.getState().selectedAccountIds;
+      const overview = await analyticsApi.getOverview(accountIds.length > 0 ? accountIds : undefined);
       set({ overview, isLoadingOverview: false });
     } catch (error) {
       set({ 
@@ -95,7 +97,12 @@ export const usePortfolioStore = create<PortfolioState>((set, get) => ({
     set({ isLoadingTransactions: true, error: null });
     try {
       const offset = (page - 1) * limit;
-      const result = await transactionApi.list({ limit, offset });
+      const accountIds = useUIStore.getState().selectedAccountIds;
+      const result = await transactionApi.list({ 
+        limit, 
+        offset,
+        account_ids: accountIds.length > 0 ? accountIds : undefined
+      });
       set({ 
         transactions: result.items, 
         transactionsTotal: result.total,
@@ -112,7 +119,8 @@ export const usePortfolioStore = create<PortfolioState>((set, get) => ({
   fetchNetValueCurve: async (from?: string, to?: string) => {
     set({ isLoadingChart: true, error: null });
     try {
-      const curve = await analyticsApi.getSnapshots(from, to);
+      const accountIds = useUIStore.getState().selectedAccountIds;
+      const curve = await analyticsApi.getSnapshots(from, to, accountIds.length > 0 ? accountIds : undefined);
       set({ netValueCurve: curve, isLoadingChart: false });
     } catch (error) {
       set({ 
@@ -124,7 +132,8 @@ export const usePortfolioStore = create<PortfolioState>((set, get) => ({
 
   fetchDistribution: async () => {
     try {
-      const distribution = await holdingApi.distribution();
+      const accountIds = useUIStore.getState().selectedAccountIds;
+      const distribution = await holdingApi.distribution(accountIds.length > 0 ? accountIds : undefined);
       set({ distribution });
     } catch (error) {
       // 静默失败，不影响主流程
@@ -339,6 +348,7 @@ interface UIState {
   transactionFormType: 'buy' | 'sell';
   isSettingsOpen: boolean;
   selectedSymbol: string | null;
+  selectedAccountIds: number[]; // 选中的账户ID列表，空数组表示所有账户
 
   // Actions
   openTransactionForm: (type?: 'buy' | 'sell') => void;
@@ -346,6 +356,7 @@ interface UIState {
   openSettings: () => void;
   closeSettings: () => void;
   selectSymbol: (symbol: string | null) => void;
+  setSelectedAccountIds: (accountIds: number[]) => void;
 }
 
 export const useUIStore = create<UIState>((set) => ({
@@ -353,10 +364,25 @@ export const useUIStore = create<UIState>((set) => ({
   transactionFormType: 'buy',
   isSettingsOpen: false,
   selectedSymbol: null,
+  selectedAccountIds: [], // 空数组表示所有账户
 
   openTransactionForm: (type = 'buy') => set({ isTransactionFormOpen: true, transactionFormType: type }),
   closeTransactionForm: () => set({ isTransactionFormOpen: false }),
   openSettings: () => set({ isSettingsOpen: true }),
   closeSettings: () => set({ isSettingsOpen: false }),
   selectSymbol: (symbol) => set({ selectedSymbol: symbol }),
+  setSelectedAccountIds: (accountIds) => {
+    set({ selectedAccountIds: accountIds });
+    // 当账户筛选改变时，自动刷新数据（延迟执行以避免循环依赖）
+    setTimeout(() => {
+      const portfolioStore = usePortfolioStore.getState();
+      Promise.all([
+        portfolioStore.fetchHoldings(),
+        portfolioStore.fetchOverview(),
+        portfolioStore.fetchTransactions(1, 10),
+        portfolioStore.fetchDistribution(),
+        portfolioStore.fetchNetValueCurve(),
+      ]).catch(console.error);
+    }, 0);
+  },
 }));

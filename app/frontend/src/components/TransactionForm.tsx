@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react';
 import { X, ArrowDown, ArrowUp } from 'lucide-react';
 import { usePortfolioStore, useUIStore } from '../store';
+import { accountApi } from '../api';
 import { getTodayET } from '../utils/timeUtils';
-import type { CreateTransactionRequest } from '../../../shared/types';
+import type { CreateTransactionRequest, Account } from '../../../shared/types';
 
 function TransactionForm() {
   const { createTransaction, holdings } = usePortfolioStore();
@@ -11,6 +12,8 @@ function TransactionForm() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [type, setType] = useState<'buy' | 'sell'>(transactionFormType);
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [selectedAccountId, setSelectedAccountId] = useState<number>(1); // 默认账户ID为1
   
   const [formData, setFormData] = useState({
     symbol: selectedSymbol || '',
@@ -21,8 +24,21 @@ function TransactionForm() {
     trade_date: getTodayET(),
   });
 
-  // 选中的持仓信息
-  const selectedHolding = holdings.find(h => h.symbol === formData.symbol.toUpperCase());
+  // 加载账户列表
+  useEffect(() => {
+    accountApi.list().then(setAccounts).catch(console.error);
+    // 如果有账户，设置第一个为默认选中
+    accountApi.list().then(accs => {
+      if (accs.length > 0) {
+        setSelectedAccountId(accs[0].id);
+      }
+    }).catch(console.error);
+  }, []);
+
+  // 选中的持仓信息（根据选中的账户和股票代码查找）
+  const selectedHolding = holdings.find(
+    h => h.symbol === formData.symbol.toUpperCase() && h.account_id === selectedAccountId
+  );
 
   // 初始化时填充股票名称
   useEffect(() => {
@@ -82,6 +98,7 @@ function TransactionForm() {
       }
 
       const data: CreateTransactionRequest = {
+        account_id: selectedAccountId,
         symbol: formData.symbol.toUpperCase(),
         name: formData.name || undefined,
         type,
@@ -182,6 +199,23 @@ function TransactionForm() {
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
+          {/* 账户选择 */}
+          <div>
+            <label className="block text-sm font-medium text-slate-600 dark:text-slate-400 mb-1.5">选择账户 *</label>
+            <select
+              value={selectedAccountId}
+              onChange={(e) => setSelectedAccountId(parseInt(e.target.value, 10))}
+              className="w-full px-3 py-2 rounded-lg bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-100 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 transition-all"
+              required
+            >
+              {accounts.map(account => (
+                <option key={account.id} value={account.id}>
+                  {account.account_name} ({account.account_type === 'stock' ? '股票' : account.account_type === 'cash' ? '现金' : '混合'})
+                </option>
+              ))}
+            </select>
+          </div>
+
           {/* 股票代码 */}
           <div>
             <label className="block text-sm font-medium text-slate-600 dark:text-slate-400 mb-1.5">股票代码 *</label>
