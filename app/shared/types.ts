@@ -226,3 +226,39 @@ export interface UpdateCashAccountRequest {
   notes?: string;
 }
 
+// 投资目标范围类型
+export type TargetScopeType = 'ALL' | 'ACCOUNT';
+
+// 投资目标
+export interface Target {
+  id: number;
+  symbol: string;
+  target_amount: number;
+  scope_type: TargetScopeType;
+  account_id: number | null;
+  created_at: string;
+  updated_at: string;
+  // 计算字段
+  invested?: number; // 已投入金额
+  remaining?: number; // 剩余金额
+  progress?: number; // 进度百分比 (0-1)
+  status?: 'pending' | 'completed' | 'exceeded'; // 状态：未完成、完成、超出
+  scope_display?: string; // 范围显示文本（"All Accounts" 或账户名称）
+}
+
+// 创建投资目标请求
+export interface CreateTargetRequest {
+  symbol: string;
+  target_amount: number;
+  scope_type: TargetScopeType;
+  account_id?: number | null; // scope_type='ACCOUNT' 时必填
+}
+
+// 更新投资目标请求
+export interface UpdateTargetRequest {
+  symbol?: string;
+  target_amount?: number;
+  scope_type?: TargetScopeType;
+  account_id?: number | null;
+}
+

@@ -90,6 +90,20 @@ CREATE TABLE IF NOT EXISTS settings (
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
+-- 投资目标表
+CREATE TABLE IF NOT EXISTS targets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    target_amount REAL NOT NULL CHECK(target_amount > 0),
+    scope_type TEXT NOT NULL CHECK(scope_type IN ('ALL', 'ACCOUNT')),
+    account_id INTEGER,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE,
+    -- 唯一性约束：同一个 symbol + scope_type + account_id 只能有一个目标
+    UNIQUE(symbol, scope_type, account_id)
+);
+
 -- 索引
 CREATE INDEX IF NOT EXISTS idx_transactions_account_id ON transactions(account_id);
 CREATE INDEX IF NOT EXISTS idx_transactions_symbol ON transactions(symbol);
@@ -102,6 +116,9 @@ CREATE INDEX IF NOT EXISTS idx_raw_snapshots_date ON raw_snapshots(date);
 CREATE INDEX IF NOT EXISTS idx_raw_snapshots_timestamp ON raw_snapshots(timestamp);
 CREATE INDEX IF NOT EXISTS idx_cash_accounts_account_id ON cash_accounts(account_id);
 CREATE INDEX IF NOT EXISTS idx_cash_accounts_account_name ON cash_accounts(account_name);
+CREATE INDEX IF NOT EXISTS idx_targets_symbol ON targets(symbol);
+CREATE INDEX IF NOT EXISTS idx_targets_scope_type ON targets(scope_type);
+CREATE INDEX IF NOT EXISTS idx_targets_account_id ON targets(account_id);
 
 -- 视图：持仓详情（含计算字段）
 CREATE VIEW IF NOT EXISTS v_positions AS

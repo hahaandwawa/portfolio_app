@@ -9,6 +9,7 @@ import TransactionForm from './components/TransactionForm';
 import TransactionList from './components/TransactionList';
 import CashAccounts from './components/CashAccounts';
 import AccountManager from './components/AccountManager';
+import TargetManager from './components/TargetManager';
 import SettingsModal from './components/SettingsModal';
 import Toast from './components/Toast';
 
@@ -107,6 +108,9 @@ function App() {
 
         {/* 账户管理 */}
         <AccountManager />
+
+        {/* 投资目标 */}
+        <TargetManager />
 
         {/* 图表区域 */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

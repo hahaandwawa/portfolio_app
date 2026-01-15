@@ -14,6 +14,9 @@ import type {
   Account,
   CreateAccountRequest,
   UpdateAccountRequest,
+  Target,
+  CreateTargetRequest,
+  UpdateTargetRequest,
 } from '../../shared/types.js';
 
 // ==================== 交易 DAO ====================
@@ -953,6 +956,124 @@ export const cashAccountDao = {
   },
 };
 
+// ==================== 投资目标 DAO ====================
+
+export const targetDao = {
+  /**
+   * 获取所有目标
+   */
+  getAll(): Target[] {
+    return query<Target>('SELECT * FROM targets ORDER BY symbol ASC, created_at DESC');
+  },
+
+  /**
+   * 根据 ID 获取目标
+   */
+  getById(id: number): Target | null {
+    return queryOne<Target>('SELECT * FROM targets WHERE id = ?', [id]);
+  },
+
+  /**
+   * 根据 symbol 和 scope 获取目标
+   */
+  getBySymbolAndScope(symbol: string, scopeType: 'ALL' | 'ACCOUNT', accountId: number | null): Target | null {
+    if (scopeType === 'ALL') {
+      return queryOne<Target>(
+        'SELECT * FROM targets WHERE symbol = ? AND scope_type = ? AND account_id IS NULL',
+        [symbol.toUpperCase(), scopeType]
+      );
+    } else {
+      return queryOne<Target>(
+        'SELECT * FROM targets WHERE symbol = ? AND scope_type = ? AND account_id = ?',
+        [symbol.toUpperCase(), scopeType, accountId]
+      );
+    }
+  },
+
+  /**
+   * 创建目标
+   */
+  create(data: CreateTargetRequest): Target {
+    const symbol = data.symbol.toUpperCase();
+    const accountId = data.scope_type === 'ACCOUNT' ? data.account_id : null;
+
+    // 检查唯一性约束
+    const existing = this.getBySymbolAndScope(symbol, data.scope_type, accountId);
+    if (existing) {
+      throw new Error(`目标已存在：${symbol} (${data.scope_type === 'ALL' ? '所有账户' : '账户ID: ' + accountId})`);
+    }
+
+    const result = run(
+      `INSERT INTO targets (symbol, target_amount, scope_type, account_id, updated_at)
+       VALUES (?, ?, ?, ?, datetime('now'))`,
+      [symbol, data.target_amount, data.scope_type, accountId]
+    );
+
+    return this.getById(result.lastInsertRowid)!;
+  },
+
+  /**
+   * 更新目标
+   */
+  update(id: number, data: UpdateTargetRequest): Target {
+    const existing = this.getById(id);
+    if (!existing) {
+      throw new Error('目标不存在');
+    }
+
+    const updates: string[] = [];
+    const values: (string | number | null)[] = [];
+
+    if (data.symbol !== undefined) {
+      updates.push('symbol = ?');
+      values.push(data.symbol.toUpperCase());
+    }
+    if (data.target_amount !== undefined) {
+      updates.push('target_amount = ?');
+      values.push(data.target_amount);
+    }
+    if (data.scope_type !== undefined) {
+      updates.push('scope_type = ?');
+      values.push(data.scope_type);
+      
+      // 如果 scope_type 改变，需要更新 account_id
+      if (data.scope_type === 'ALL') {
+        updates.push('account_id = NULL');
+      } else if (data.account_id !== undefined) {
+        updates.push('account_id = ?');
+        values.push(data.account_id);
+      }
+    } else if (data.account_id !== undefined) {
+      // 如果只更新 account_id，需要确保 scope_type 是 ACCOUNT
+      if (existing.scope_type !== 'ACCOUNT') {
+        throw new Error('只有 ACCOUNT 类型的目标才能设置 account_id');
+      }
+      updates.push('account_id = ?');
+      values.push(data.account_id);
+    }
+
+    if (updates.length === 0) {
+      return existing;
+    }
+
+    updates.push("updated_at = datetime('now')");
+    values.push(id);
+
+    const sql = `UPDATE targets SET ${updates.join(', ')} WHERE id = ?`;
+    run(sql, values);
+
+    return this.getById(id)!;
+  },
+
+  /**
+   * 删除目标
+   */
+  delete(id: number): boolean {
+    const result = run('DELETE FROM targets WHERE id = ?', [id]);
+    return result.changes > 0;
+  },
+};
+
 export default {
   accountDao,
   transactionDao,
@@ -961,4 +1082,5 @@ export default {
   fxRateDao,
   settingsDao,
   cashAccountDao,
+  targetDao,
 };

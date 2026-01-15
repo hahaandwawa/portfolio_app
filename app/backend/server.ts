@@ -8,6 +8,7 @@ import { analyticsService } from './services/analyticsService.js';
 import { snapshotService } from './services/snapshotService.js';
 import { cashService } from './services/cashService.js';
 import { accountService } from './services/accountService.js';
+import { targetService } from './services/targetService.js';
 import { settingsDao } from './db/dao.js';
 import { yahooProvider } from './providers/yahoo.js';
 import { alphaVantageProvider } from './providers/alphaVantage.js';
@@ -22,6 +23,8 @@ import type {
   UpdateCashAccountRequest,
   CreateAccountRequest,
   UpdateAccountRequest,
+  CreateTargetRequest,
+  UpdateTargetRequest,
 } from '../shared/types.js';
 
 // 创建 Fastify 实例
@@ -676,6 +679,145 @@ fastify.delete<{ Params: { id: string } }>('/api/cash-accounts/:id', async (requ
     reply.status(500).send({
       success: false,
       error: error instanceof Error ? error.message : '删除现金账户失败',
+      code: 500,
+    });
+  }
+});
+
+// ==================== 投资目标 API ====================
+
+// 获取所有目标
+fastify.get('/api/targets', async (request, reply) => {
+  try {
+    const targets = targetService.getAllTargets();
+    return {
+      success: true,
+      data: targets,
+    };
+  } catch (error) {
+    fastify.log.error(error);
+    reply.status(500).send({
+      success: false,
+      error: error instanceof Error ? error.message : '获取投资目标失败',
+      code: 500,
+    });
+  }
+});
+
+// 获取单个目标
+fastify.get<{ Params: { id: string } }>('/api/targets/:id', async (request, reply) => {
+  try {
+    const id = parseInt(request.params.id, 10);
+    if (isNaN(id)) {
+      reply.status(400).send({
+        success: false,
+        error: '无效的目标ID',
+        code: 400,
+      });
+      return;
+    }
+    
+    const target = targetService.getTarget(id);
+    if (!target) {
+      reply.status(404).send({
+        success: false,
+        error: '目标不存在',
+        code: 404,
+      });
+      return;
+    }
+    
+    return {
+      success: true,
+      data: target,
+    };
+  } catch (error) {
+    fastify.log.error(error);
+    reply.status(500).send({
+      success: false,
+      error: error instanceof Error ? error.message : '获取投资目标失败',
+      code: 500,
+    });
+  }
+});
+
+// 创建目标
+fastify.post<{ Body: CreateTargetRequest }>('/api/targets', async (request, reply) => {
+  try {
+    const target = targetService.createTarget(request.body);
+    return {
+      success: true,
+      data: target,
+    };
+  } catch (error) {
+    fastify.log.error(error);
+    reply.status(400).send({
+      success: false,
+      error: error instanceof Error ? error.message : '创建投资目标失败',
+      code: 400,
+    });
+  }
+});
+
+// 更新目标
+fastify.put<{ Params: { id: string }; Body: UpdateTargetRequest }>('/api/targets/:id', async (request, reply) => {
+  try {
+    const id = parseInt(request.params.id, 10);
+    if (isNaN(id)) {
+      reply.status(400).send({
+        success: false,
+        error: '无效的目标ID',
+        code: 400,
+      });
+      return;
+    }
+    
+    const target = targetService.updateTarget(id, request.body);
+    return {
+      success: true,
+      data: target,
+    };
+  } catch (error) {
+    fastify.log.error(error);
+    reply.status(400).send({
+      success: false,
+      error: error instanceof Error ? error.message : '更新投资目标失败',
+      code: 400,
+    });
+  }
+});
+
+// 删除目标
+fastify.delete<{ Params: { id: string } }>('/api/targets/:id', async (request, reply) => {
+  try {
+    const id = parseInt(request.params.id, 10);
+    if (isNaN(id)) {
+      reply.status(400).send({
+        success: false,
+        error: '无效的目标ID',
+        code: 400,
+      });
+      return;
+    }
+    
+    const deleted = targetService.deleteTarget(id);
+    if (!deleted) {
+      reply.status(404).send({
+        success: false,
+        error: '目标不存在',
+        code: 404,
+      });
+      return;
+    }
+    
+    return {
+      success: true,
+    };
+  } catch (error) {
+    fastify.log.error(error);
+    reply.status(500).send({
+      success: false,
+      error: error instanceof Error ? error.message : '删除投资目标失败',
       code: 500,
     });
   }

@@ -16,6 +16,9 @@ import type {
   Account,
   CreateAccountRequest,
   UpdateAccountRequest,
+  Target,
+  CreateTargetRequest,
+  UpdateTargetRequest,
 } from '../../../shared/types';
 
 const API_BASE = '/api';
@@ -355,6 +358,53 @@ export const cashAccountApi = {
   },
 };
 
+// ==================== 投资目标 API ====================
+
+export const targetApi = {
+  /**
+   * 获取所有目标
+   */
+  async list(): Promise<Target[]> {
+    return request('/targets');
+  },
+
+  /**
+   * 获取单个目标
+   */
+  async get(id: number): Promise<Target> {
+    return request(`/targets/${id}`);
+  },
+
+  /**
+   * 创建目标
+   */
+  async create(data: CreateTargetRequest): Promise<Target> {
+    return request('/targets', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  },
+
+  /**
+   * 更新目标
+   */
+  async update(id: number, data: UpdateTargetRequest): Promise<Target> {
+    return request(`/targets/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    });
+  },
+
+  /**
+   * 删除目标
+   */
+  async delete(id: number): Promise<void> {
+    await request(`/targets/${id}`, {
+      method: 'DELETE',
+    });
+  },
+};
+
 // ==================== 健康检查 ====================
 
 export const healthApi = {
@@ -371,6 +421,7 @@ export default {
   analytics: analyticsApi,
   snapshot: snapshotApi,
   cashAccount: cashAccountApi,
+  target: targetApi,
   settings: settingsApi,
   health: healthApi,
 };
