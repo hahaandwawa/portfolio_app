@@ -1,5 +1,6 @@
 import { holdingDao, cashAccountDao, snapshotDao } from '../db/dao.js';
 import { getTodayET, isTradingDayET, isMarketOpenET, isHolidayET, getCurrentTimeET } from '../../shared/timeUtils.js';
+import { marketDataService } from './marketDataService.js';
 import type { Holding, PortfolioOverview } from '../../shared/types.js';
 import type { DailySnapshot } from '../../shared/types.js';
 
@@ -221,9 +222,79 @@ export const holdingService = {
   },
 
   /**
-   * 获取持仓总览
+   * 获取所有持仓的开市价格（用于计算今日盈亏）
+   * @param date 日期
+   * @param holdings 当前持仓列表
+   * @returns 每个持仓的开市价格 Map
    */
-  getOverview(accountIds?: number[]): PortfolioOverview {
+  async getOpenPrices(date: string, holdings: (Holding & { market_value: number; unrealized_pnl: number; unrealized_pnl_pct: number; weight: number })[]): Promise<Map<string, number>> {
+    const priceMap = new Map<string, number>();
+    
+    // 获取每个持仓的开市价格
+    for (const holding of holdings) {
+      if (holding.total_qty <= 0) {
+        continue;
+      }
+      
+      try {
+        const priceData = await marketDataService.getHistoricalPriceWithOpen(holding.symbol, date);
+        if (priceData && priceData.open) {
+          priceMap.set(holding.symbol, priceData.open);
+        } else {
+          // 如果无法获取开市价格，尝试使用前一个交易日的闭市价格
+          console.warn(`无法获取 ${holding.symbol} ${date} 的开市价格，尝试使用前一个交易日的闭市价格`);
+          
+          // 向前查找最近一个交易日（最多查找30天）
+          let previousTradingDay = null;
+          for (let i = 1; i <= 30; i++) {
+            const checkDate = new Date(date);
+            checkDate.setDate(checkDate.getDate() - i);
+            const checkDateStr = checkDate.toLocaleString('en-US', { 
+              timeZone: 'America/New_York',
+              year: 'numeric',
+              month: '2-digit',
+              day: '2-digit'
+            });
+            const [month, day, year] = checkDateStr.split('/');
+            const formattedDateStr = `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
+            
+            if (isTradingDayET(formattedDateStr) && formattedDateStr < date) {
+              previousTradingDay = formattedDateStr;
+              break;
+            }
+          }
+          
+          if (previousTradingDay) {
+            const prevPriceData = await marketDataService.getHistoricalPriceWithOpen(holding.symbol, previousTradingDay);
+            if (prevPriceData && prevPriceData.close) {
+              priceMap.set(holding.symbol, prevPriceData.close);
+              console.log(`使用 ${holding.symbol} ${previousTradingDay} 的闭市价格 ${prevPriceData.close.toFixed(2)} 作为 ${date} 的开市价格近似`);
+            } else {
+              // 如果仍然无法获取，使用当前价格作为最后的后备
+              priceMap.set(holding.symbol, holding.last_price);
+              console.warn(`无法获取 ${holding.symbol} 的历史价格，使用当前价格 ${holding.last_price.toFixed(2)} 作为近似`);
+            }
+          } else {
+            priceMap.set(holding.symbol, holding.last_price);
+            console.warn(`无法找到前一个交易日，使用当前价格 ${holding.last_price.toFixed(2)} 作为近似`);
+          }
+        }
+        
+        // 添加延迟以避免API频率限制
+        await new Promise(resolve => setTimeout(resolve, 100));
+      } catch (error) {
+        console.warn(`获取 ${holding.symbol} 开市价格失败，使用当前价格作为近似:`, error);
+        priceMap.set(holding.symbol, holding.last_price);
+      }
+    }
+    
+    return priceMap;
+  },
+
+  /**
+   * 获取持仓总览（异步版本，每次刷新都重新计算今日盈亏）
+   */
+  async getOverview(accountIds?: number[]): Promise<PortfolioOverview> {
     const holdings = this.getAllHoldings(accountIds);
     
     // 获取总现金余额
@@ -237,6 +308,8 @@ export const holdingService = {
     const totalPnlPct = totalCost > 0 ? (totalPnl / totalCost) * 100 : 0;
 
     // 计算今日盈亏：根据开市/闭市状态使用不同的计算逻辑
+    // 今日盈亏 = 当前实时的总持仓股价 - 今天早上开市时的股价（在开市期间）
+    // 其他时间段返回0或使用闭市快照计算
     let todayPnl = 0;
     let todayPnlPct = 0;
     let todayPnlStatus: string | undefined = undefined;
@@ -263,79 +336,105 @@ export const holdingService = {
       const todayCloseSnapshot = this.getMarketCloseSnapshot(today);
       
       if (isMarketOpen) {
-        // 开市时间段：使用实时的总股票金额 - 开市时的总股票金额
-        if (todayOpenSnapshot) {
-          const openTotalStockValue = todayOpenSnapshot.total_market_value;
-          const currentTotalStockValue = totalMarketValue;
+        // 开市时间段（9:30 AM - 4:00 PM ET）：
+        // 今日盈亏 = Σ(当前持仓数量 × (当前价格 - 开市价格))
+        // 每次刷新都重新获取所有持仓的开市价格和当前价格
+        
+        try {
+          // 重新获取所有持仓的开市价格
+          const openPrices = await this.getOpenPrices(today, holdings);
           
-          todayPnl = currentTotalStockValue - openTotalStockValue;
-          
-          if (openTotalStockValue > 0) {
-            todayPnlPct = (todayPnl / openTotalStockValue) * 100;
+          // 计算今日盈亏：基于当前持仓数量和当前价格
+          let totalOpenValue = 0;
+          for (const holding of holdings) {
+            if (holding.total_qty <= 0) {
+              continue;
+            }
+            
+            const openPrice = openPrices.get(holding.symbol);
+            if (openPrice !== undefined) {
+              // 使用当前持仓数量 × 开市价格
+              totalOpenValue += holding.total_qty * openPrice;
+            } else {
+              // 如果无法获取开市价格，使用当前市值（避免计算错误）
+              totalOpenValue += holding.market_value;
+            }
           }
-        } else {
-          // 如果没有开市快照，无法计算
-          console.warn('未找到今日开市快照，今日盈亏无法计算');
-          todayPnl = 0;
-          todayPnlPct = 0;
+          
+          // 今日盈亏 = 当前总市值 - 当前持仓在开市时的市值
+          todayPnl = totalMarketValue - totalOpenValue;
+          
+          if (totalOpenValue > 0) {
+            todayPnlPct = (todayPnl / totalOpenValue) * 100;
+          }
+          
+          // 详细日志：显示每个持仓的贡献
+          console.log(`✅ 今日盈亏计算完成: ${todayPnl.toFixed(2)} (${todayPnlPct.toFixed(2)}%), 基于 ${holdings.length} 只持仓的实时数据`);
+          for (const holding of holdings) {
+            if (holding.total_qty <= 0) continue;
+            const openPrice = openPrices.get(holding.symbol);
+            if (openPrice !== undefined) {
+              const holdingPnl = holding.total_qty * (holding.last_price - openPrice);
+              const holdingPnlPct = ((holding.last_price - openPrice) / openPrice) * 100;
+              console.log(`   ${holding.symbol}: ${holding.total_qty} 股 × ($${holding.last_price.toFixed(2)} - $${openPrice.toFixed(2)}) = $${holdingPnl.toFixed(2)} (${holdingPnlPct.toFixed(2)}%)`);
+            }
+          }
+        } catch (error) {
+          console.error('计算今日盈亏失败:', error);
+          // 如果获取开市价格失败，使用快照方法作为后备
+          if (todayOpenSnapshot) {
+            const openTotalStockValue = todayOpenSnapshot.total_market_value;
+            todayPnl = totalMarketValue - openTotalStockValue;
+            if (openTotalStockValue > 0) {
+              todayPnlPct = (todayPnl / openTotalStockValue) * 100;
+            }
+          } else {
+            todayPnl = 0;
+            todayPnlPct = 0;
+          }
         }
       } else {
         // 闭市时间段或开市前
         if (currentTime < 9 * 60 + 30) {
-          // 凌晨12:00am到开市前：使用前一日闭市时的总股票金额 - 前一日开市时的总股票金额
-          // 向前查找最近一个交易日的快照（最多查找30天）
-          let previousTradingDay = null;
-          for (let i = 1; i <= 30; i++) {
-            // 获取 i 天前的日期（ET时区）
-            const checkDate = new Date();
-            checkDate.setDate(checkDate.getDate() - i);
-            const checkDateStr = checkDate.toLocaleString('en-US', { 
-              timeZone: 'America/New_York',
-              year: 'numeric',
-              month: '2-digit',
-              day: '2-digit'
-            });
-            const [month, day, year] = checkDateStr.split('/');
-            const formattedDateStr = `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
-            
-            if (isTradingDayET(formattedDateStr) && formattedDateStr < today) {
-              previousTradingDay = formattedDateStr;
-              break;
-            }
-          }
-          
-          if (previousTradingDay) {
-            const prevOpenSnapshot = this.getMarketOpenSnapshot(previousTradingDay);
-            const prevCloseSnapshot = this.getMarketCloseSnapshot(previousTradingDay);
-            
-            if (prevOpenSnapshot && prevCloseSnapshot) {
-              const prevOpenTotalStockValue = prevOpenSnapshot.total_market_value;
-              const prevCloseTotalStockValue = prevCloseSnapshot.total_market_value;
-              
-              todayPnl = prevCloseTotalStockValue - prevOpenTotalStockValue;
-              
-              if (prevOpenTotalStockValue > 0) {
-                todayPnlPct = (todayPnl / prevOpenTotalStockValue) * 100;
-              }
-              
-              todayPnlStatus = '已闭市';
-            } else {
-              // 如果没有找到前一日快照，尝试使用每日快照
-              const prevDailySnapshots = snapshotDao.getRange(previousTradingDay, previousTradingDay);
-              if (prevDailySnapshots.length > 0) {
-                // 使用每日快照作为闭市快照，开市快照使用相同的值（作为近似）
-                const prevTotalStockValue = prevDailySnapshots[0].total_market_value;
-                todayPnl = 0; // 如果没有开市快照，无法计算盈亏
-                todayPnlPct = 0;
-                todayPnlStatus = '已闭市';
-              }
-            }
-          }
+          // 开市前（凌晨12:00am到9:30 AM）：返回0
+          todayPnl = 0;
+          todayPnlPct = 0;
+          todayPnlStatus = '开市前';
         } else {
-          // 闭市后（4:00 PM 到晚上11:59pm）：使用今日闭市时的总股票金额 - 开市时的总股票金额
-          // 注意：这里使用之前获取的 todayCloseSnapshot（在开市时间段判断之前已获取）
-          
-          if (todayOpenSnapshot && todayCloseSnapshot) {
+          // 闭市后（4:00 PM 到晚上11:59pm）：
+          // 重新获取所有持仓的开市价格，基于当前持仓数量计算
+          try {
+            // 重新获取所有持仓的开市价格
+            const openPrices = await this.getOpenPrices(today, holdings);
+            
+            // 计算今日盈亏：基于当前持仓数量和当前价格
+            let totalOpenValue = 0;
+            for (const holding of holdings) {
+              if (holding.total_qty <= 0) {
+                continue;
+              }
+              
+              const openPrice = openPrices.get(holding.symbol);
+              if (openPrice !== undefined) {
+                totalOpenValue += holding.total_qty * openPrice;
+              } else {
+                totalOpenValue += holding.market_value;
+              }
+            }
+            
+            todayPnl = totalMarketValue - totalOpenValue;
+            
+            if (totalOpenValue > 0) {
+              todayPnlPct = (todayPnl / totalOpenValue) * 100;
+            }
+            
+            todayPnlStatus = '已闭市';
+            console.log(`✅ 今日盈亏计算完成（闭市后）: ${todayPnl.toFixed(2)}, 基于 ${holdings.length} 只持仓的实时数据`);
+          } catch (error) {
+            console.error('计算今日盈亏失败（闭市后）:', error);
+            // 如果获取开市价格失败，使用快照方法作为后备
+            if (todayOpenSnapshot && todayCloseSnapshot) {
+            // 使用快照方法（基于快照时的持仓数量）
             const openTotalStockValue = todayOpenSnapshot.total_market_value;
             const closeTotalStockValue = todayCloseSnapshot.total_market_value;
             
@@ -345,7 +444,6 @@ export const holdingService = {
               todayPnlPct = (todayPnl / openTotalStockValue) * 100;
             }
             
-            // 闭市后添加"已闭市"标识
             todayPnlStatus = '已闭市';
           } else if (todayOpenSnapshot) {
             // 只有开市快照，没有闭市快照，使用每日快照作为闭市快照
@@ -360,23 +458,24 @@ export const holdingService = {
                 todayPnlPct = (todayPnl / openTotalStockValue) * 100;
               }
               
-              // 闭市后添加"已闭市"标识
+              todayPnlStatus = '已闭市';
+            } else {
+              console.warn('未找到今日闭市快照和每日快照，今日盈亏无法计算');
+              todayPnl = 0;
+              todayPnlPct = 0;
               todayPnlStatus = '已闭市';
             }
           } else if (todayCloseSnapshot) {
-            // 只有闭市快照，没有开市快照，无法计算（需要开市快照作为基准）
             console.warn('未找到今日开市快照，无法计算今日盈亏（需要开市快照作为基准）');
             todayPnl = 0;
             todayPnlPct = 0;
-            // 即使无法计算，也标注"已闭市"
             todayPnlStatus = '已闭市';
           } else {
-            // 如果既没有开市快照也没有闭市快照，无法计算
-            console.warn('未找到今日开市和闭市快照，今日盈亏无法计算');
-            todayPnl = 0;
-            todayPnlPct = 0;
-            // 即使无法计算，也标注"已闭市"（因为当前时间在闭市后）
-            todayPnlStatus = '已闭市';
+              console.warn('未找到今日开市和闭市快照，今日盈亏无法计算');
+              todayPnl = 0;
+              todayPnlPct = 0;
+              todayPnlStatus = '已闭市';
+            }
           }
         }
       }

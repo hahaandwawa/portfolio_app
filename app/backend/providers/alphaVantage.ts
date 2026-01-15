@@ -1,6 +1,7 @@
 import AlphaVantage from 'alphavantage';
 import type { MarketDataProvider, HistoricalPricePoint } from '../services/marketDataService.js';
 import type { QuoteData } from '../../shared/types.js';
+import { withRetry, isRateLimitError, createRateLimiter } from '../utils/retry.js';
 
 /**
  * Alpha Vantage API 配置
@@ -10,6 +11,10 @@ import type { QuoteData } from '../../shared/types.js';
 const API_KEY = process.env.ALPHA_VANTAGE_API_KEY || 'demo'; // demo key 有严格限制
 
 const av = AlphaVantage({ key: API_KEY });
+
+// Alpha Vantage 免费层限制：每分钟 5 次请求
+// 创建速率限制器，确保请求间隔至少 12 秒（60秒/5次 = 12秒/次）
+const rateLimiter = createRateLimiter(12000);
 
 /**
  * 将股票代码转换为 Alpha Vantage 格式
@@ -27,15 +32,30 @@ export const alphaVantageProvider: MarketDataProvider = {
   name: 'alphavantage',
 
   /**
-   * 获取单个股票行情
+   * 获取单个股票行情（带重试机制）
    */
   async getQuote(symbol: string): Promise<QuoteData | null> {
+    const avSymbol = toAlphaVantageSymbol(symbol);
+    
     try {
-      const avSymbol = toAlphaVantageSymbol(symbol);
-      console.log(`[Alpha Vantage] 正在获取 ${symbol} 的行情数据...`);
-      
-      // Alpha Vantage 使用 quote 函数获取实时数据
-      const data = await av.data.quote(avSymbol);
+      // 使用速率限制器和重试机制
+      const data = await rateLimiter.execute(() =>
+        withRetry(
+          async () => {
+            console.log(`[Alpha Vantage] 正在获取 ${symbol} 的行情数据...`);
+            return await av.data.quote(avSymbol);
+          },
+          {
+            maxRetries: 3,
+            initialDelay: 5000, // 初始延迟5秒
+            maxDelay: 60000, // 最大延迟60秒
+            retryOnlyOnRateLimit: true,
+            onRetry: (error, attempt, delay) => {
+              console.log(`[Alpha Vantage] 重试获取 ${symbol} (尝试 ${attempt}/3，等待 ${delay}ms)...`);
+            },
+          }
+        )
+      );
       
       // 检查错误响应
       if (data && data['Error Message']) {
@@ -43,9 +63,31 @@ export const alphaVantageProvider: MarketDataProvider = {
         return null;
       }
       
-      // 检查频率限制
+      // 检查频率限制（如果仍然返回 Note，说明需要更长的等待时间）
       if (data && data['Note']) {
-        console.warn(`[Alpha Vantage] API 频率限制: ${data['Note']}`);
+        const note = String(data['Note']);
+        if (isRateLimitError(note)) {
+          console.warn(`[Alpha Vantage] API 频率限制: ${note}`);
+          // 等待更长时间后重试一次
+          console.log(`[Alpha Vantage] 等待 60 秒后重试...`);
+          await new Promise(resolve => setTimeout(resolve, 60000));
+          
+          try {
+            const retryData = await av.data.quote(avSymbol);
+            if (retryData && retryData['Note']) {
+              console.error(`[Alpha Vantage] ❌ 重试后仍然遇到频率限制，请稍后再试`);
+              return null;
+            }
+            // 如果重试成功，继续处理数据
+            if (retryData && retryData['Global Quote']) {
+              const quote = retryData['Global Quote'];
+              return this.parseQuoteData(symbol, quote);
+            }
+          } catch (retryError) {
+            console.error(`[Alpha Vantage] 重试失败:`, retryError);
+            return null;
+          }
+        }
         return null;
       }
       
@@ -55,35 +97,14 @@ export const alphaVantageProvider: MarketDataProvider = {
       }
 
       const quote = data['Global Quote'];
-      const price = parseFloat(quote['05. price']);
-      const change = parseFloat(quote['09. change'] || '0');
-      const changePercentStr = quote['10. change percent'] || '0%';
-      const changePercent = parseFloat(changePercentStr.replace('%', ''));
-      const volume = parseInt(quote['06. volume'] || '0', 10);
-
-      if (isNaN(price) || price <= 0) {
-        console.warn(`[Alpha Vantage] 无效的价格数据: ${price}`);
-        return null;
-      }
-
-      const result: QuoteData = {
-        symbol: symbol.toUpperCase(),
-        price: price,
-        change: change,
-        change_pct: changePercent,
-        volume: volume,
-        timestamp: new Date().toISOString(),
-      };
-      
-      console.log(`[Alpha Vantage] ✅ 成功获取 ${symbol} 行情: $${result.price}`);
-      return result;
+      return this.parseQuoteData(symbol, quote);
     } catch (error: unknown) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       console.error(`[Alpha Vantage] 获取 ${symbol} 行情失败:`, errorMsg);
       
-      // Alpha Vantage 免费层限制提示
-      if (errorMsg.includes('API call frequency') || errorMsg.includes('Thank you for using Alpha Vantage') || errorMsg.includes('Note')) {
-        console.warn('[Alpha Vantage] ⚠️ API 调用频率限制，请稍后再试或升级到付费计划');
+      // 如果是速率限制错误，已经通过重试机制处理过了
+      if (isRateLimitError(error)) {
+        console.warn('[Alpha Vantage] ⚠️ API 调用频率限制，已尝试重试但失败，请稍后再试或升级到付费计划');
       }
       
       return null;
@@ -91,8 +112,37 @@ export const alphaVantageProvider: MarketDataProvider = {
   },
 
   /**
+   * 解析行情数据
+   */
+  parseQuoteData(symbol: string, quote: Record<string, string>): QuoteData | null {
+    const price = parseFloat(quote['05. price']);
+    const change = parseFloat(quote['09. change'] || '0');
+    const changePercentStr = quote['10. change percent'] || '0%';
+    const changePercent = parseFloat(changePercentStr.replace('%', ''));
+    const volume = parseInt(quote['06. volume'] || '0', 10);
+
+    if (isNaN(price) || price <= 0) {
+      console.warn(`[Alpha Vantage] 无效的价格数据: ${price}`);
+      return null;
+    }
+
+    const result: QuoteData = {
+      symbol: symbol.toUpperCase(),
+      price: price,
+      change: change,
+      change_pct: changePercent,
+      volume: volume,
+      timestamp: new Date().toISOString(),
+    };
+    
+    console.log(`[Alpha Vantage] ✅ 成功获取 ${symbol} 行情: $${result.price}`);
+    return result;
+  },
+
+  /**
    * 批量获取股票行情
    * 注意：Alpha Vantage 免费层不支持批量查询，需要逐个获取
+   * 使用速率限制器确保请求间隔
    */
   async getQuotes(symbols: string[]): Promise<Map<string, QuoteData>> {
     const result = new Map<string, QuoteData>();
@@ -102,15 +152,8 @@ export const alphaVantageProvider: MarketDataProvider = {
     }
 
     // Alpha Vantage 免费层限制：每分钟 5 次请求
-    // 为了避免触发限制，我们添加延迟
-    for (let i = 0; i < symbols.length; i++) {
-      const symbol = symbols[i];
-      
-      // 除了第一个请求，其他请求之间延迟 15 秒（确保不超过每分钟 5 次的限制）
-      if (i > 0) {
-        await new Promise(resolve => setTimeout(resolve, 15000));
-      }
-      
+    // 速率限制器已经确保请求间隔至少 12 秒
+    for (const symbol of symbols) {
       const quote = await this.getQuote(symbol);
       if (quote) {
         result.set(symbol.toUpperCase(), quote);

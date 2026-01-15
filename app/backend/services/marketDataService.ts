@@ -1,5 +1,7 @@
 import type { QuoteData } from '../../shared/types.js';
 import { holdingService } from './holdingService.js';
+import { isRateLimitError } from '../utils/retry.js';
+import { logger } from '../utils/logger.js';
 
 /**
  * 历史价格数据点
@@ -104,7 +106,13 @@ export const marketDataService = {
         return quote;
       }
     } catch (error) {
-      console.warn(`[${requestedProvider}] 获取 ${symbol} 行情失败，尝试备用 provider:`, error);
+      // 如果是速率限制错误，记录警告但不立即尝试备用 provider
+      // 因为备用 provider 可能也会遇到同样的问题
+      if (isRateLimitError(error)) {
+        logger.warn(`[${requestedProvider}] 获取 ${symbol} 行情失败: API 速率限制，provider 已自动重试`);
+      } else {
+        logger.warn(`[${requestedProvider}] 获取 ${symbol} 行情失败，尝试备用 provider:`, error);
+      }
     }
 
     // 如果主 provider 失败，尝试备用 provider
@@ -126,7 +134,11 @@ export const marketDataService = {
           return quote;
         }
       } catch (error) {
-        console.warn(`[${fallbackName}] 备用 provider 也失败:`, error);
+        if (isRateLimitError(error)) {
+          logger.warn(`[${fallbackName}] 备用 provider 也遇到速率限制:`, error);
+        } else {
+          logger.warn(`[${fallbackName}] 备用 provider 也失败:`, error);
+        }
       }
     }
     
@@ -160,7 +172,7 @@ export const marketDataService = {
       const timeSinceLastRequest = now - lastRequestTime;
       
       if (timeSinceLastRequest < MIN_REQUEST_INTERVAL) {
-        console.log(`请求频率限制，请等待 ${MIN_REQUEST_INTERVAL - timeSinceLastRequest}ms`);
+        logger.info(`请求频率限制，请等待 ${MIN_REQUEST_INTERVAL - timeSinceLastRequest}ms`);
         // 返回已缓存的数据
         return result;
       }
@@ -178,9 +190,14 @@ export const marketDataService = {
           result.set(symbol, quote);
         }
       } catch (error) {
-        console.warn(`[${provider.name}] 批量获取失败，降级到逐个获取:`, error);
+        // 如果是速率限制错误，provider 已经尝试重试过了
+        if (isRateLimitError(error)) {
+          logger.warn(`[${provider.name}] 批量获取失败: API 速率限制，provider 已自动重试，降级到逐个获取`);
+        } else {
+          logger.warn(`[${provider.name}] 批量获取失败，降级到逐个获取:`, error);
+        }
         
-        // 降级到逐个获取
+        // 降级到逐个获取（每个请求都会经过 provider 的重试机制）
         for (const symbol of symbolsToFetch) {
           const quote = await this.getQuote(symbol, requestedProvider);
           if (quote) {
@@ -331,9 +348,13 @@ export const marketDataService = {
           return name;
         }
       }
-    } catch (error) {
-      console.warn(`[${requestedProvider}] 获取 ${symbol} 名称失败，尝试备用 provider:`, error);
-    }
+      } catch (error) {
+        if (isRateLimitError(error)) {
+          logger.warn(`[${requestedProvider}] 获取 ${symbol} 名称失败: API 速率限制`);
+        } else {
+          logger.warn(`[${requestedProvider}] 获取 ${symbol} 名称失败，尝试备用 provider:`, error);
+        }
+      }
 
     // 如果主 provider 失败，尝试备用 provider
     const fallbackProviders = ['alphavantage', 'yahoo'].filter(p => p !== requestedProvider);
@@ -352,7 +373,11 @@ export const marketDataService = {
           }
         }
       } catch (error) {
-        console.warn(`[${fallbackName}] 备用 provider 也失败:`, error);
+        if (isRateLimitError(error)) {
+          logger.warn(`[${fallbackName}] 备用 provider 也遇到速率限制:`, error);
+        } else {
+          logger.warn(`[${fallbackName}] 备用 provider 也失败:`, error);
+        }
       }
     }
     
@@ -384,11 +409,15 @@ export const marketDataService = {
                 name: stockName,
               });
             }
-            console.log(`✅ 已更新股票名称: ${symbol} -> ${stockName}`);
+            logger.info(`✅ 已更新股票名称: ${symbol} -> ${stockName}`);
           }
         }
       } catch (error) {
-        console.warn(`更新股票名称失败: ${symbol}`, error);
+        if (isRateLimitError(error)) {
+          logger.warn(`更新股票名称失败: ${symbol} (API 速率限制)`);
+        } else {
+          logger.warn(`更新股票名称失败: ${symbol}`, error);
+        }
       }
     }
   },

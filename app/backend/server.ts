@@ -301,15 +301,24 @@ fastify.get<{ Params: { symbol: string }; Querystring: { provider?: string } }>(
 
 // 获取总览
 fastify.get<{ Querystring: { account_ids?: string } }>('/api/analytics/overview', async (request, reply) => {
-  let accountIds: number[] | undefined;
-  if (request.query.account_ids) {
-    accountIds = request.query.account_ids.split(',').map(id => parseInt(id, 10)).filter(id => !isNaN(id));
+  try {
+    let accountIds: number[] | undefined;
+    if (request.query.account_ids) {
+      accountIds = request.query.account_ids.split(',').map(id => parseInt(id, 10)).filter(id => !isNaN(id));
+    }
+    const overview = await analyticsService.getOverview(accountIds);
+    return {
+      success: true,
+      data: overview,
+    };
+  } catch (error) {
+    console.error('获取总览失败:', error);
+    reply.code(500);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : '获取总览失败',
+    };
   }
-  const overview = analyticsService.getOverview(accountIds);
-  return {
-    success: true,
-    data: overview,
-  };
 });
 
 // 获取第一条记录的日期

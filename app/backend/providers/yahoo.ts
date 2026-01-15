@@ -1,9 +1,14 @@
 import YahooFinance from 'yahoo-finance2';
 import type { MarketDataProvider, HistoricalPricePoint } from '../services/marketDataService.js';
 import type { QuoteData } from '../../shared/types.js';
+import { withRetry, isRateLimitError, createRateLimiter } from '../utils/retry.js';
 
 // v3 需要先实例化
 const yahooFinance = new YahooFinance();
+
+// Yahoo Finance 速率限制：建议每次请求间隔至少 1 秒
+// 创建速率限制器，确保请求间隔至少 1 秒
+const rateLimiter = createRateLimiter(1000);
 
 /**
  * 将股票代码转换为 Yahoo Finance 格式
@@ -62,72 +67,70 @@ export const yahooProvider: MarketDataProvider = {
   name: 'yahoo',
 
   /**
-   * 获取单个股票行情（带重试机制）
+   * 获取单个股票行情（带重试机制和速率限制）
    */
-  async getQuote(symbol: string, retries: number = 2): Promise<QuoteData | null> {
+  async getQuote(symbol: string): Promise<QuoteData | null> {
     const yahooSymbol = toYahooSymbol(symbol);
     
-    for (let attempt = 0; attempt <= retries; attempt++) {
-      try {
-        if (attempt > 0) {
-          // 重试前等待，每次等待时间递增
-          const waitTime = attempt * 2000; // 2秒、4秒...
-          console.log(`等待 ${waitTime}ms 后重试获取 ${symbol} 行情...`);
-          await new Promise(resolve => setTimeout(resolve, waitTime));
-        }
-        
-        console.log(`正在获取 ${symbol} (${yahooSymbol}) 的行情数据... (尝试 ${attempt + 1}/${retries + 1})`);
-        
-        const quote = await yahooFinance.quote(yahooSymbol);
-        
-        if (!quote) {
-          console.warn(`无法获取 ${symbol} 的行情数据: 返回数据为空`);
-          continue; // 继续重试
-        }
-        
-        // 检查是否有价格数据
-        const price = quote.regularMarketPrice || quote.price || quote.currentPrice;
-        if (!price) {
-          console.warn(`无法获取 ${symbol} 的价格数据，返回的数据结构:`, Object.keys(quote));
-          continue; // 继续重试
-        }
-
-        const result = {
-          symbol: symbol.toUpperCase(),
-          price: price,
-          change: quote.regularMarketChange || quote.change || quote.changeInPercent || 0,
-          change_pct: quote.regularMarketChangePercent || quote.changePercent || 0,
-          volume: quote.regularMarketVolume || quote.volume || 0,
-          timestamp: new Date().toISOString(),
-        };
-        
-        console.log(`✅ 成功获取 ${symbol} 行情: $${result.price}`);
-        return result;
-      } catch (error: unknown) {
-        const errorMsg = error instanceof Error ? error.message : String(error);
-        
-        // 如果是频率限制错误
-        if (errorMsg.includes('Too Many Requests') || errorMsg.includes('429') || errorMsg.includes('Unexpected token')) {
-          if (attempt < retries) {
-            console.warn(`⚠️ Yahoo Finance API 请求频率过高，将在 ${(attempt + 1) * 2} 秒后重试...`);
-            continue; // 继续重试
-          } else {
-            console.error(`❌ 获取 ${symbol} 行情失败: Yahoo Finance API 请求频率过高，请稍后再试`);
-            return null;
+    try {
+      // 使用速率限制器和重试机制
+      const quote = await rateLimiter.execute(() =>
+        withRetry(
+          async () => {
+            console.log(`正在获取 ${symbol} (${yahooSymbol}) 的行情数据...`);
+            return await yahooFinance.quote(yahooSymbol);
+          },
+          {
+            maxRetries: 3,
+            initialDelay: 2000, // 初始延迟2秒
+            maxDelay: 30000, // 最大延迟30秒
+            retryOnlyOnRateLimit: true,
+            onRetry: (error, attempt, delay) => {
+              console.log(`[Yahoo Finance] 重试获取 ${symbol} (尝试 ${attempt}/3，等待 ${delay}ms)...`);
+            },
           }
-        } else {
-          // 其他错误，直接返回
-          console.error(`获取 ${symbol} 行情失败:`, errorMsg);
-          return null;
-        }
+        )
+      );
+      
+      if (!quote) {
+        console.warn(`无法获取 ${symbol} 的行情数据: 返回数据为空`);
+        return null;
       }
+      
+      // 检查是否有价格数据
+      const price = quote.regularMarketPrice || quote.price || quote.currentPrice;
+      if (!price) {
+        console.warn(`无法获取 ${symbol} 的价格数据，返回的数据结构:`, Object.keys(quote));
+        return null;
+      }
+
+      const result: QuoteData = {
+        symbol: symbol.toUpperCase(),
+        price: price,
+        change: quote.regularMarketChange || quote.change || quote.changeInPercent || 0,
+        change_pct: quote.regularMarketChangePercent || quote.changePercent || 0,
+        volume: quote.regularMarketVolume || quote.volume || 0,
+        timestamp: new Date().toISOString(),
+      };
+      
+      console.log(`✅ 成功获取 ${symbol} 行情: $${result.price}`);
+      return result;
+    } catch (error: unknown) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      
+      // 如果是速率限制错误，已经通过重试机制处理过了
+      if (isRateLimitError(error)) {
+        console.error(`❌ 获取 ${symbol} 行情失败: Yahoo Finance API 请求频率过高，已尝试重试但失败，请稍后再试`);
+      } else {
+        console.error(`获取 ${symbol} 行情失败:`, errorMsg);
+      }
+      
+      return null;
     }
-    
-    return null;
   },
 
   /**
-   * 批量获取股票行情
+   * 批量获取股票行情（带重试机制和速率限制）
    */
   async getQuotes(symbols: string[]): Promise<Map<string, QuoteData>> {
     const result = new Map<string, QuoteData>();
@@ -137,8 +140,25 @@ export const yahooProvider: MarketDataProvider = {
     }
 
     try {
+      // 使用速率限制器和重试机制进行批量获取
       const yahooSymbols = symbols.map(toYahooSymbol);
-      const quotes = await yahooFinance.quote(yahooSymbols);
+      const quotes = await rateLimiter.execute(() =>
+        withRetry(
+          async () => {
+            console.log(`[Yahoo Finance] 批量获取 ${symbols.length} 个股票的行情数据...`);
+            return await yahooFinance.quote(yahooSymbols);
+          },
+          {
+            maxRetries: 3,
+            initialDelay: 3000, // 初始延迟3秒
+            maxDelay: 30000, // 最大延迟30秒
+            retryOnlyOnRateLimit: true,
+            onRetry: (error, attempt, delay) => {
+              console.log(`[Yahoo Finance] 批量获取重试 (尝试 ${attempt}/3，等待 ${delay}ms)...`);
+            },
+          }
+        )
+      );
       
       // quote 可能返回单个对象或数组
       const quotesArray = Array.isArray(quotes) ? quotes : [quotes];
@@ -157,10 +177,12 @@ export const yahooProvider: MarketDataProvider = {
           });
         }
       }
-    } catch (error) {
-      console.error('批量获取行情失败:', error);
       
-      // 降级到逐个获取
+      console.log(`[Yahoo Finance] ✅ 批量获取成功: ${result.size}/${symbols.length} 个股票`);
+    } catch (error) {
+      console.warn('[Yahoo Finance] 批量获取行情失败，降级到逐个获取:', error);
+      
+      // 降级到逐个获取（每个请求都会经过速率限制器和重试机制）
       for (const symbol of symbols) {
         const quote = await this.getQuote(symbol);
         if (quote) {

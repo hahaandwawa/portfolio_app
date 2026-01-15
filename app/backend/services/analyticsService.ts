@@ -10,10 +10,10 @@ import type { NetValuePoint, IndexPoint, PortfolioOverview, Transaction, CashAcc
  */
 export const analyticsService = {
   /**
-   * 获取投资组合总览
+   * 获取投资组合总览（异步版本）
    */
-  getOverview(accountIds?: number[]): PortfolioOverview {
-    return holdingService.getOverview(accountIds);
+  async getOverview(accountIds?: number[]): Promise<PortfolioOverview> {
+    return await holdingService.getOverview(accountIds);
   },
 
   /**
