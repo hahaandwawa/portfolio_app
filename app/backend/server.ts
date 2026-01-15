@@ -54,7 +54,7 @@ fastify.setErrorHandler((error, request, reply) => {
 
 // 创建交易
 fastify.post<{ Body: CreateTransactionRequest }>('/api/transactions', async (request, reply) => {
-  const result = transactionService.createTransaction(request.body);
+  const result = await transactionService.createTransaction(request.body);
   
   // 从交易日期开始，重新计算之后所有日期的快照
   try {
@@ -106,7 +106,7 @@ fastify.put<{ Params: { id: string }; Body: UpdateTransactionRequest }>('/api/tr
     
     fastify.log.info({ id, body: request.body }, `[API] 更新交易记录: ID=${id}`);
     
-    const result = transactionService.updateTransaction(id, request.body);
+    const result = await transactionService.updateTransaction(id, request.body);
     
     // 确认更新成功
     if (!result || !result.transaction) {

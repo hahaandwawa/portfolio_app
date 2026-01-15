@@ -21,6 +21,12 @@ export interface MarketDataProvider {
   getQuotes(symbols: string[]): Promise<Map<string, QuoteData>>;
   getHistoricalPrices(symbol: string, from: string, to: string): Promise<{ date: string; close: number }[]>;
   getHistoricalPricesWithOpen(symbol: string, date: string): Promise<HistoricalPricePoint | null>;
+  /**
+   * 获取股票名称
+   * @param symbol 股票代码
+   * @returns 股票名称，如果无法获取则返回 null
+   */
+  getStockName?(symbol: string): Promise<string | null>;
 }
 
 /**
@@ -189,6 +195,7 @@ export const marketDataService = {
 
   /**
    * 刷新所有持仓的价格
+   * 同时检查并更新名称为空的股票
    */
   async refreshAllPrices(providerName?: string): Promise<{ updated: number; failed: string[] }> {
     const symbols = holdingService.getAllSymbols();
@@ -210,16 +217,20 @@ export const marketDataService = {
       }
     }
 
-    // 更新数据库
+    // 更新数据库中的价格
     if (prices.size > 0) {
       holdingService.updatePrices(prices);
     }
+
+    // 检查并更新名称为空的股票
+    await this.updateMissingStockNames(symbols, providerName);
 
     return { updated: prices.size, failed };
   },
 
   /**
    * 刷新指定股票的价格
+   * 同时检查并更新名称为空的股票
    */
   async refreshPrices(symbols: string[], providerName?: string): Promise<{ updated: number; failed: string[] }> {
     if (symbols.length === 0) {
@@ -239,10 +250,13 @@ export const marketDataService = {
       }
     }
 
-    // 更新数据库
+    // 更新数据库中的价格
     if (prices.size > 0) {
       holdingService.updatePrices(prices);
     }
+
+    // 检查并更新名称为空的股票
+    await this.updateMissingStockNames(symbols, providerName);
 
     return { updated: prices.size, failed };
   },
@@ -296,6 +310,87 @@ export const marketDataService = {
     }
     
     return null;
+  },
+
+  /**
+   * 获取股票名称
+   * @param symbol 股票代码
+   * @param providerName 可选的 provider 名称
+   * @returns 股票名称，如果无法获取则返回 null
+   */
+  async getStockName(symbol: string, providerName?: string): Promise<string | null> {
+    const requestedProvider = providerName || this.defaultProvider;
+    
+    try {
+      const provider = this.getProvider(requestedProvider);
+      
+      // 如果 provider 实现了 getStockName 方法，使用它
+      if (provider.getStockName) {
+        const name = await provider.getStockName(symbol);
+        if (name) {
+          return name;
+        }
+      }
+    } catch (error) {
+      console.warn(`[${requestedProvider}] 获取 ${symbol} 名称失败，尝试备用 provider:`, error);
+    }
+
+    // 如果主 provider 失败，尝试备用 provider
+    const fallbackProviders = ['alphavantage', 'yahoo'].filter(p => p !== requestedProvider);
+    
+    for (const fallbackName of fallbackProviders) {
+      if (!this.providers.has(fallbackName)) {
+        continue;
+      }
+      
+      try {
+        const fallbackProvider = this.getProvider(fallbackName);
+        if (fallbackProvider.getStockName) {
+          const name = await fallbackProvider.getStockName(symbol);
+          if (name) {
+            return name;
+          }
+        }
+      } catch (error) {
+        console.warn(`[${fallbackName}] 备用 provider 也失败:`, error);
+      }
+    }
+    
+    return null;
+  },
+
+  /**
+   * 更新名称为空的股票
+   * @param symbols 股票代码列表
+   * @param providerName 可选的 provider 名称
+   */
+  async updateMissingStockNames(symbols: string[], providerName?: string): Promise<void> {
+    const { holdingDao } = await import('../db/dao.js');
+    
+    for (const symbol of symbols) {
+      try {
+        // 检查该股票的所有持仓，看是否有名称为空的
+        const holdings = holdingDao.getAll().filter(h => h.symbol.toUpperCase() === symbol.toUpperCase() && (!h.name || h.name.trim() === ''));
+        
+        if (holdings.length > 0) {
+          // 获取股票名称
+          const stockName = await this.getStockName(symbol, providerName);
+          
+          if (stockName) {
+            // 更新所有该股票的持仓名称
+            for (const holding of holdings) {
+              holdingDao.upsert({
+                ...holding,
+                name: stockName,
+              });
+            }
+            console.log(`✅ 已更新股票名称: ${symbol} -> ${stockName}`);
+          }
+        }
+      } catch (error) {
+        console.warn(`更新股票名称失败: ${symbol}`, error);
+      }
+    }
   },
 
   /**

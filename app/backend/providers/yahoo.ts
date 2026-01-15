@@ -278,6 +278,38 @@ export const yahooProvider: MarketDataProvider = {
       return null;
     }
   },
+
+  /**
+   * 获取股票名称
+   */
+  async getStockName(symbol: string): Promise<string | null> {
+    try {
+      const yahooSymbol = toYahooSymbol(symbol);
+      console.log(`正在获取 ${symbol} (${yahooSymbol}) 的股票名称...`);
+      
+      const quote = await yahooFinance.quote(yahooSymbol);
+      
+      if (!quote) {
+        console.warn(`无法获取 ${symbol} 的股票名称: 返回数据为空`);
+        return null;
+      }
+      
+      // Yahoo Finance 通常提供 longName 或 shortName
+      const name = (quote as any).longName || (quote as any).shortName || (quote as any).displayName;
+      
+      if (name) {
+        console.log(`✅ 成功获取 ${symbol} 名称: ${name}`);
+        return name;
+      }
+      
+      console.warn(`无法从 ${symbol} 的行情数据中提取名称，返回的数据结构:`, Object.keys(quote));
+      return null;
+    } catch (error: unknown) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      console.error(`获取 ${symbol} 股票名称失败:`, errorMsg);
+      return null;
+    }
+  },
 };
 
 export default yahooProvider;

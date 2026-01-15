@@ -1,6 +1,7 @@
 import { transactionDao, holdingDao } from '../db/dao.js';
 import { withTransaction } from '../db/index.js';
 import { logger } from '../utils/logger.js';
+import { marketDataService } from './marketDataService.js';
 import type { 
   Transaction, 
   CreateTransactionRequest,
@@ -16,10 +17,27 @@ export const transactionService = {
   /**
    * 创建交易记录
    * 执行校验、写入交易、更新持仓
+   * 如果股票名称为空，会自动从 API 查询并填入
    */
-  createTransaction(data: CreateTransactionRequest): { transaction: Transaction; holding: Holding } {
+  async createTransaction(data: CreateTransactionRequest): Promise<{ transaction: Transaction; holding: Holding }> {
     // 基础校验
     this.validateTransaction(data);
+
+    // 如果名称为空，尝试从 API 获取
+    if (!data.name || data.name.trim() === '') {
+      try {
+        const stockName = await marketDataService.getStockName(data.symbol);
+        if (stockName) {
+          data.name = stockName;
+          logger.info(`自动获取股票名称: ${data.symbol} -> ${stockName}`);
+        } else {
+          logger.warn(`无法获取股票名称: ${data.symbol}，将使用空名称`);
+        }
+      } catch (error) {
+        logger.warn(`获取股票名称失败: ${data.symbol}`, error);
+        // 即使获取名称失败，也继续创建交易
+      }
+    }
 
     // 卖出校验
     if (data.type === 'sell') {
@@ -200,8 +218,9 @@ export const transactionService = {
 
   /**
    * 更新交易记录（需要重新计算持仓）
+   * 如果股票名称为空或股票代码改变，会自动从 API 查询并填入
    */
-  updateTransaction(id: number, data: UpdateTransactionRequest): { transaction: Transaction; holding: Holding } {
+  async updateTransaction(id: number, data: UpdateTransactionRequest): Promise<{ transaction: Transaction; holding: Holding }> {
     const existingTransaction = transactionDao.getById(id);
     if (!existingTransaction) {
       throw new TransactionError('交易记录不存在', 404);
@@ -219,6 +238,26 @@ export const transactionService = {
     }
     if (data.type && !['buy', 'sell'].includes(data.type)) {
       throw new TransactionError('交易类型必须是 buy 或 sell', 400);
+    }
+
+    // 如果名称为空或股票代码改变，尝试从 API 获取名称
+    const symbol = data.symbol?.toUpperCase() || existingTransaction.symbol;
+    const needsNameUpdate = (!data.name || data.name.trim() === '') && 
+                            (symbol !== existingTransaction.symbol || !existingTransaction.name);
+    
+    if (needsNameUpdate) {
+      try {
+        const stockName = await marketDataService.getStockName(symbol);
+        if (stockName) {
+          data.name = stockName;
+          logger.info(`自动获取股票名称: ${symbol} -> ${stockName}`);
+        } else {
+          logger.warn(`无法获取股票名称: ${symbol}，将使用空名称`);
+        }
+      } catch (error) {
+        logger.warn(`获取股票名称失败: ${symbol}`, error);
+        // 即使获取名称失败，也继续更新交易
+      }
     }
 
     try {

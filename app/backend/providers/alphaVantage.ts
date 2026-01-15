@@ -222,6 +222,41 @@ export const alphaVantageProvider: MarketDataProvider = {
       return null;
     }
   },
+
+  /**
+   * 获取股票名称
+   * 注意：Alpha Vantage 的 quote API 不直接提供公司名称
+   * 可以尝试使用 overview API，但需要额外的 API 调用
+   */
+  async getStockName(symbol: string): Promise<string | null> {
+    try {
+      const avSymbol = toAlphaVantageSymbol(symbol);
+      console.log(`正在获取 ${symbol} 的股票名称 (Alpha Vantage)...`);
+      
+      // Alpha Vantage 的 overview API 提供公司信息
+      const data = await av.data.companyOverview(avSymbol);
+      
+      if (data && data['Name']) {
+        const name = data['Name'];
+        console.log(`✅ 成功获取 ${symbol} 名称: ${name}`);
+        return name;
+      }
+      
+      // 如果 overview API 失败，尝试从 quote 中获取（虽然通常没有名称）
+      const quoteData = await av.data.quote(avSymbol);
+      if (quoteData && quoteData['Global Quote'] && quoteData['Global Quote']['01. symbol']) {
+        // Alpha Vantage quote 不提供名称，返回 null
+        console.warn(`Alpha Vantage quote API 不提供股票名称`);
+        return null;
+      }
+      
+      return null;
+    } catch (error: unknown) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      console.error(`获取 ${symbol} 股票名称失败 (Alpha Vantage):`, errorMsg);
+      return null;
+    }
+  },
 };
 
 export default alphaVantageProvider;
