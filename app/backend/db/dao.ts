@@ -27,8 +27,8 @@ export const transactionDao = {
    */
   create(data: CreateTransactionRequest): Transaction {
     const result = run(
-      `INSERT INTO transactions (account_id, symbol, name, type, price, quantity, fee, currency, trade_date)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO transactions (account_id, symbol, name, type, price, quantity, fee, currency, trade_date, cash_account_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         data.account_id,
         data.symbol.toUpperCase(),
@@ -38,7 +38,8 @@ export const transactionDao = {
         data.quantity,
         data.fee || 0,
         data.currency || 'USD',
-        data.trade_date
+        data.trade_date,
+        data.cash_account_id || null
       ]
     );
 
@@ -100,6 +101,10 @@ export const transactionDao = {
     if (data.trade_date !== undefined) {
       updates.push('trade_date = ?');
       values.push(data.trade_date);
+    }
+    if (data.cash_account_id !== undefined) {
+      updates.push('cash_account_id = ?');
+      values.push(data.cash_account_id || null);
     }
 
     if (updates.length === 0) {

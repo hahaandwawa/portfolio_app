@@ -2,6 +2,7 @@ import { transactionDao, holdingDao } from '../db/dao.js';
 import { withTransaction } from '../db/index.js';
 import { logger } from '../utils/logger.js';
 import { marketDataService } from './marketDataService.js';
+import { cashService } from './cashService.js';
 import type { 
   Transaction, 
   CreateTransactionRequest,
@@ -57,6 +58,27 @@ export const transactionService = {
     
     // 更新持仓
     const holding = this.updateHolding(data);
+    
+    // 更新现金账户余额（如果提供了现金账户ID）
+    if (data.cash_account_id) {
+      try {
+        if (data.type === 'buy') {
+          // 买入：从现金账户扣除（价格*数量+手续费）
+          const totalAmount = data.price * data.quantity + (data.fee || 0);
+          cashService.adjustBalance(data.cash_account_id, -totalAmount);
+          logger.info(`从现金账户 ${data.cash_account_id} 扣除 ${totalAmount}`);
+        } else {
+          // 卖出：向现金账户增加（价格*数量-手续费）
+          const totalAmount = data.price * data.quantity - (data.fee || 0);
+          cashService.adjustBalance(data.cash_account_id, totalAmount);
+          logger.info(`向现金账户 ${data.cash_account_id} 增加 ${totalAmount}`);
+        }
+      } catch (error) {
+        logger.error('更新现金账户余额失败', error);
+        // 如果现金账户更新失败，可以选择回滚交易或继续（这里选择继续，因为交易已经记录）
+        // 在实际应用中，可能需要使用事务来确保一致性
+      }
+    }
     
     return { transaction, holding };
   },
@@ -262,6 +284,26 @@ export const transactionService = {
 
     try {
       logger.debug(`开始更新交易记录 ID=${id}`, data);
+      
+      // 先回滚旧交易对现金账户的影响
+      if (existingTransaction.cash_account_id) {
+        try {
+          if (existingTransaction.type === 'buy') {
+            // 买入：回滚扣除，即增加回去（价格*数量+手续费）
+            const oldTotalAmount = existingTransaction.price * existingTransaction.quantity + existingTransaction.fee;
+            cashService.adjustBalance(existingTransaction.cash_account_id, oldTotalAmount);
+            logger.info(`回滚：向现金账户 ${existingTransaction.cash_account_id} 增加 ${oldTotalAmount}`);
+          } else {
+            // 卖出：回滚增加，即扣除回去（价格*数量-手续费）
+            const oldTotalAmount = existingTransaction.price * existingTransaction.quantity - existingTransaction.fee;
+            cashService.adjustBalance(existingTransaction.cash_account_id, -oldTotalAmount);
+            logger.info(`回滚：从现金账户 ${existingTransaction.cash_account_id} 扣除 ${oldTotalAmount}`);
+          }
+        } catch (error) {
+          logger.error('回滚现金账户余额失败', error);
+        }
+      }
+      
       const result = withTransaction(() => {
         // 更新交易记录
         const updatedTransaction = transactionDao.update(id, data);
@@ -292,6 +334,31 @@ export const transactionService = {
         
         return { transaction: updatedTransaction, holding };
       });
+      
+      // 应用新交易对现金账户的影响
+      const finalTransaction = transactionDao.getById(id);
+      if (finalTransaction && finalTransaction.cash_account_id) {
+        try {
+          const newPrice = data.price !== undefined ? data.price : existingTransaction.price;
+          const newQuantity = data.quantity !== undefined ? data.quantity : existingTransaction.quantity;
+          const newFee = data.fee !== undefined ? data.fee : existingTransaction.fee;
+          const newType = data.type || existingTransaction.type;
+          
+          if (newType === 'buy') {
+            // 买入：从现金账户扣除（价格*数量+手续费）
+            const newTotalAmount = newPrice * newQuantity + newFee;
+            cashService.adjustBalance(finalTransaction.cash_account_id, -newTotalAmount);
+            logger.info(`从现金账户 ${finalTransaction.cash_account_id} 扣除 ${newTotalAmount}`);
+          } else {
+            // 卖出：向现金账户增加（价格*数量-手续费）
+            const newTotalAmount = newPrice * newQuantity - newFee;
+            cashService.adjustBalance(finalTransaction.cash_account_id, newTotalAmount);
+            logger.info(`向现金账户 ${finalTransaction.cash_account_id} 增加 ${newTotalAmount}`);
+          }
+        } catch (error) {
+          logger.error('更新现金账户余额失败', error);
+        }
+      }
       
       // 最终确认：再次查询数据库验证更新是否成功
       const finalCheck = transactionDao.getById(id);
@@ -324,6 +391,25 @@ export const transactionService = {
       }
 
       logger.debug(`开始删除交易记录 ID=${id}`, transaction);
+      
+      // 先回滚现金账户的影响
+      if (transaction.cash_account_id) {
+        try {
+          if (transaction.type === 'buy') {
+            // 买入：回滚扣除，即增加回去（价格*数量+手续费）
+            const totalAmount = transaction.price * transaction.quantity + transaction.fee;
+            cashService.adjustBalance(transaction.cash_account_id, totalAmount);
+            logger.info(`回滚：向现金账户 ${transaction.cash_account_id} 增加 ${totalAmount}`);
+          } else {
+            // 卖出：回滚增加，即扣除回去（价格*数量-手续费）
+            const totalAmount = transaction.price * transaction.quantity - transaction.fee;
+            cashService.adjustBalance(transaction.cash_account_id, -totalAmount);
+            logger.info(`回滚：从现金账户 ${transaction.cash_account_id} 扣除 ${totalAmount}`);
+          }
+        } catch (error) {
+          logger.error('回滚现金账户余额失败', error);
+        }
+      }
       
       const result = withTransaction(() => {
         const deleted = transactionDao.delete(id);

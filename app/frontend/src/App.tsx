@@ -11,12 +11,13 @@ import CashAccounts from './components/CashAccounts';
 import AccountManager from './components/AccountManager';
 import TargetManager from './components/TargetManager';
 import SettingsModal from './components/SettingsModal';
+import ExportImportModal from './components/ExportImportModal';
 import Toast from './components/Toast';
 
 function App() {
   const { refreshAll, error, clearError, isRefreshingPrices } = usePortfolioStore();
   const { fetchSettings, theme, refreshInterval } = useSettingsStore();
-  const { isTransactionFormOpen, isSettingsOpen, selectedAccountIds } = useUIStore();
+  const { isTransactionFormOpen, isSettingsOpen, isExportImportOpen, selectedAccountIds } = useUIStore();
   const [isInitialized, setIsInitialized] = useState(false);
 
   // 初始化加载
@@ -140,6 +141,27 @@ function App() {
 
       {/* 设置弹窗 */}
       {isSettingsOpen && <SettingsModal />}
+
+      {/* 导出/导入弹窗 */}
+      {isExportImportOpen && (
+        <ExportImportModal
+          isOpen={isExportImportOpen}
+          onClose={() => useUIStore.getState().closeExportImport()}
+          onImportComplete={async () => {
+            // 立即刷新基础数据（持仓、总览、交易列表等）
+            // 净值曲线会在后台异步加载，不阻塞UI
+            const portfolioStore = usePortfolioStore.getState();
+            await Promise.all([
+              portfolioStore.fetchHoldings(),
+              portfolioStore.fetchOverview(),
+              portfolioStore.fetchTransactions(),
+              portfolioStore.fetchDistribution(),
+            ]);
+            // 净值曲线异步加载，不等待
+            portfolioStore.fetchNetValueCurve().catch(console.error);
+          }}
+        />
+      )}
 
       {/* Toast 提示 */}
       {error && (

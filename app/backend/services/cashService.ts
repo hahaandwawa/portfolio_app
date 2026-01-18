@@ -67,6 +67,25 @@ export const cashService = {
   getTotalCash(accountIds?: number[]): number {
     return cashAccountDao.getTotalCash(accountIds);
   },
+
+  /**
+   * 调整现金账户余额（增加或减少）
+   * @param id 现金账户ID
+   * @param amount 调整金额（正数表示增加，负数表示减少）
+   */
+  adjustBalance(id: number, amount: number): CashAccount {
+    const account = cashAccountDao.getById(id);
+    if (!account) {
+      throw new Error('现金账户不存在');
+    }
+
+    const newAmount = account.amount + amount;
+    if (newAmount < 0) {
+      throw new Error(`余额不足：当前余额 ${account.amount}，尝试扣除 ${Math.abs(amount)}`);
+    }
+
+    return cashAccountDao.update(id, { amount: newAmount });
+  },
 };
 
 export default cashService;

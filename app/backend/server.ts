@@ -9,6 +9,7 @@ import { snapshotService } from './services/snapshotService.js';
 import { cashService } from './services/cashService.js';
 import { accountService } from './services/accountService.js';
 import { targetService } from './services/targetService.js';
+import { exportService, importService } from './services/exportImportService.js';
 import { settingsDao } from './db/dao.js';
 import { yahooProvider } from './providers/yahoo.js';
 import { alphaVantageProvider } from './providers/alphaVantage.js';
@@ -56,19 +57,16 @@ fastify.setErrorHandler((error, request, reply) => {
 fastify.post<{ Body: CreateTransactionRequest }>('/api/transactions', async (request, reply) => {
   const result = await transactionService.createTransaction(request.body);
   
-  // 从交易日期开始，重新计算之后所有日期的快照
-  try {
-    const today = getTodayET();
-    const tradeDate = request.body.trade_date;
-    
-    if (tradeDate <= today) {
-      fastify.log.info(`交易日期 ${tradeDate}，开始重新计算从该日期到今天的快照...`);
-      await snapshotService.recalculateSnapshotsFromDate(tradeDate);
-      fastify.log.info(`快照重新计算完成`);
-    }
-  } catch (error) {
-    // 快照生成失败不影响交易创建，只记录日志
-    fastify.log.warn({ error }, '重新计算快照失败，但不影响交易创建');
+  // 从交易日期开始，重新计算之后所有日期的快照（异步执行，不阻塞响应）
+  const today = getTodayET();
+  const tradeDate = request.body.trade_date;
+  
+  if (tradeDate <= today) {
+    // 异步执行，不等待完成
+    snapshotService.recalculateSnapshotsFromDate(tradeDate).catch((error) => {
+      fastify.log.warn({ error }, '后台重新计算快照失败，但不影响交易创建');
+    });
+    fastify.log.info(`交易日期 ${tradeDate}，快照将在后台重新计算...`);
   }
   
   return {
@@ -121,18 +119,16 @@ fastify.put<{ Params: { id: string }; Body: UpdateTransactionRequest }>('/api/tr
     
     fastify.log.info(`[API] ✅ 交易记录更新成功: ID=${id}`);
     
-    // 从交易日期开始，重新计算之后所有日期的快照
-    try {
-      const today = getTodayET();
-      const tradeDate = result.transaction.trade_date;
-      
-      if (tradeDate <= today) {
-        fastify.log.info(`交易日期 ${tradeDate}，开始重新计算从该日期到今天的快照...`);
-        await snapshotService.recalculateSnapshotsFromDate(tradeDate);
-        fastify.log.info(`快照重新计算完成`);
-      }
-    } catch (error) {
-      fastify.log.warn({ error }, '重新计算快照失败，但不影响交易更新');
+    // 从交易日期开始，重新计算之后所有日期的快照（异步执行，不阻塞响应）
+    const today = getTodayET();
+    const tradeDate = result.transaction.trade_date;
+    
+    if (tradeDate <= today) {
+      // 异步执行，不等待完成
+      snapshotService.recalculateSnapshotsFromDate(tradeDate).catch((error) => {
+        fastify.log.warn({ error }, '后台重新计算快照失败，但不影响交易更新');
+      });
+      fastify.log.info(`交易日期 ${tradeDate}，快照将在后台重新计算...`);
     }
     
     return {
@@ -189,18 +185,16 @@ fastify.delete<{ Params: { id: string } }>('/api/transactions/:id', async (reque
       return;
     }
     
-    // 从交易日期开始，重新计算之后所有日期的快照（删除后持仓已更新）
+    // 从交易日期开始，重新计算之后所有日期的快照（异步执行，不阻塞响应）
     if (tradeDate) {
-      try {
-        const today = getTodayET();
-        
-        if (tradeDate <= today) {
-          fastify.log.info(`交易日期 ${tradeDate}，开始重新计算从该日期到今天的快照...`);
-          await snapshotService.recalculateSnapshotsFromDate(tradeDate);
-          fastify.log.info(`快照重新计算完成`);
-        }
-      } catch (error) {
-        fastify.log.warn({ error }, '重新计算快照失败，但不影响交易删除');
+      const today = getTodayET();
+      
+      if (tradeDate <= today) {
+        // 异步执行，不等待完成
+        snapshotService.recalculateSnapshotsFromDate(tradeDate).catch((error) => {
+          fastify.log.warn({ error }, '后台重新计算快照失败，但不影响交易删除');
+        });
+        fastify.log.info(`交易日期 ${tradeDate}，快照将在后台重新计算...`);
       }
     }
     
@@ -229,13 +223,129 @@ fastify.delete<{ Params: { id: string } }>('/api/transactions/:id', async (reque
   }
 });
 
-// 导出交易 CSV
+// 导出交易 CSV（保留旧接口以兼容）
 fastify.get('/api/export/transactions.csv', async (request, reply) => {
   const csv = transactionService.exportToCsv();
   reply
     .header('Content-Type', 'text/csv; charset=utf-8')
     .header('Content-Disposition', 'attachment; filename="transactions.csv"')
     .send(csv);
+});
+
+// ==================== 数据导出/导入 API ====================
+
+// 导出所有数据
+fastify.get('/api/export/all', async (request, reply) => {
+  try {
+    const data = exportService.exportAll();
+    return {
+      success: true,
+      data,
+    };
+  } catch (error) {
+    fastify.log.error(error);
+    reply.status(500).send({
+      success: false,
+      error: error instanceof Error ? error.message : '导出数据失败',
+      code: 500,
+    });
+  }
+});
+
+// 导出单个CSV文件
+fastify.get<{ Params: { type: string } }>('/api/export/:type', async (request, reply) => {
+  try {
+    const { type } = request.params;
+    let csv: string;
+    let filename: string;
+
+    switch (type) {
+      case 'accounts':
+        csv = exportService.exportAccounts();
+        filename = 'accounts.csv';
+        break;
+      case 'transactions':
+        csv = exportService.exportTransactions();
+        filename = 'transactions.csv';
+        break;
+      case 'cash_accounts':
+        csv = exportService.exportCashAccounts();
+        filename = 'cash_accounts.csv';
+        break;
+      case 'targets':
+        csv = exportService.exportTargets();
+        filename = 'targets.csv';
+        break;
+      default:
+        reply.status(400).send({
+          success: false,
+          error: `不支持的类型: ${type}`,
+          code: 400,
+        });
+        return;
+    }
+
+    reply
+      .header('Content-Type', 'text/csv; charset=utf-8')
+      .header('Content-Disposition', `attachment; filename="${filename}"`)
+      .send(csv);
+  } catch (error) {
+    fastify.log.error(error);
+    reply.status(500).send({
+      success: false,
+      error: error instanceof Error ? error.message : '导出数据失败',
+      code: 500,
+    });
+  }
+});
+
+// 导入数据（从JSON对象，包含所有CSV内容）
+fastify.post<{
+  Body: {
+    accounts?: string;
+    transactions?: string;
+    cash_accounts?: string;
+    targets?: string;
+    options?: {
+      skipExisting?: boolean;
+      recalculateSnapshots?: boolean;
+    };
+  };
+}>('/api/import', async (request, reply) => {
+  try {
+    const { accounts, transactions, cash_accounts, targets, options } = request.body;
+
+    if (!accounts && !transactions && !cash_accounts && !targets) {
+      reply.status(400).send({
+        success: false,
+        error: '至少需要提供一个CSV文件',
+        code: 400,
+      });
+      return;
+    }
+
+    const result = await importService.importAll(
+      {
+        accounts,
+        transactions,
+        cash_accounts,
+        targets,
+      },
+      options || {}
+    );
+
+    return {
+      success: true,
+      data: result,
+    };
+  } catch (error) {
+    fastify.log.error(error);
+    reply.status(500).send({
+      success: false,
+      error: error instanceof Error ? error.message : '导入数据失败',
+      code: 500,
+    });
+  }
 });
 
 // ==================== 持仓 API ====================

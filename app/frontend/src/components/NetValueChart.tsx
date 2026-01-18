@@ -604,13 +604,17 @@ function NetValueChart() {
 
       {isLoadingChart ? (
         <div style={{ height: '320px' }} className="flex items-center justify-center">
-          <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+          <div className="text-center">
+            <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto mb-2" />
+            <p className="text-sm text-slate-500 dark:text-slate-400">正在加载净值曲线数据...</p>
+          </div>
         </div>
       ) : netValueCurve.length === 0 ? (
         <div style={{ height: '320px' }} className="flex items-center justify-center text-slate-500 dark:text-slate-400">
           <div className="text-center">
             <p className="mb-2">暂无净值数据</p>
             <p className="text-xs">系统会在开盘和收市时自动生成快照</p>
+            <p className="text-xs mt-2 text-slate-400 dark:text-slate-500">数据正在后台计算中，请稍候刷新</p>
           </div>
         </div>
       ) : (

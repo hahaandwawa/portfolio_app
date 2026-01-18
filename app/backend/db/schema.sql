@@ -23,8 +23,10 @@ CREATE TABLE IF NOT EXISTS transactions (
     fee REAL DEFAULT 0 CHECK(fee >= 0),
     currency TEXT DEFAULT 'USD',
     trade_date TEXT NOT NULL,
+    cash_account_id INTEGER,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE RESTRICT
+    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE RESTRICT,
+    FOREIGN KEY (cash_account_id) REFERENCES cash_accounts(id) ON DELETE SET NULL
 );
 
 -- 持仓表（同一只股票可以在不同账户中持有）

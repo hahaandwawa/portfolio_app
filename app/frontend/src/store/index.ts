@@ -324,8 +324,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         default_provider: defaultProvider,
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : '保存设置失败';
-      set({ error: message });
+      // 保存设置失败时抛出错误，让调用方处理
       throw error;
     }
   },
@@ -347,6 +346,7 @@ interface UIState {
   isTransactionFormOpen: boolean;
   transactionFormType: 'buy' | 'sell';
   isSettingsOpen: boolean;
+  isExportImportOpen: boolean;
   selectedSymbol: string | null;
   selectedAccountIds: number[]; // 选中的账户ID列表，空数组表示所有账户
 
@@ -355,6 +355,8 @@ interface UIState {
   closeTransactionForm: () => void;
   openSettings: () => void;
   closeSettings: () => void;
+  openExportImport: () => void;
+  closeExportImport: () => void;
   selectSymbol: (symbol: string | null) => void;
   setSelectedAccountIds: (accountIds: number[]) => void;
 }
@@ -363,6 +365,7 @@ export const useUIStore = create<UIState>((set) => ({
   isTransactionFormOpen: false,
   transactionFormType: 'buy',
   isSettingsOpen: false,
+  isExportImportOpen: false,
   selectedSymbol: null,
   selectedAccountIds: [], // 空数组表示所有账户
 
@@ -370,6 +373,8 @@ export const useUIStore = create<UIState>((set) => ({
   closeTransactionForm: () => set({ isTransactionFormOpen: false }),
   openSettings: () => set({ isSettingsOpen: true }),
   closeSettings: () => set({ isSettingsOpen: false }),
+  openExportImport: () => set({ isExportImportOpen: true }),
+  closeExportImport: () => set({ isExportImportOpen: false }),
   selectSymbol: (symbol) => set({ selectedSymbol: symbol }),
   setSelectedAccountIds: (accountIds) => {
     set({ selectedAccountIds: accountIds });

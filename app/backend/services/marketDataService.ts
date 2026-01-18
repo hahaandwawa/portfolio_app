@@ -40,7 +40,7 @@ interface CacheEntry {
 }
 
 // 缓存配置
-const CACHE_TTL = 5000; // 5秒缓存
+const CACHE_TTL = 30000; // 30秒缓存（与最小请求间隔保持一致）
 const MIN_REQUEST_INTERVAL = 30000; // 最小请求间隔 30秒
 
 // 内存缓存

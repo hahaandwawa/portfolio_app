@@ -8,10 +8,11 @@ import {
   Download,
   TrendingUp,
   RotateCcw,
-  Filter
+  Filter,
+  Upload
 } from 'lucide-react';
 import { usePortfolioStore, useSettingsStore, useUIStore } from '../store';
-import { transactionApi, accountApi } from '../api';
+import { accountApi } from '../api';
 import type { Account } from '../../../shared/types';
 
 function Header() {
@@ -22,7 +23,7 @@ function Header() {
     isRebuildingSnapshots
   } = usePortfolioStore();
   const { theme, toggleTheme, refreshInterval } = useSettingsStore();
-  const { openTransactionForm, openSettings, selectedAccountIds, setSelectedAccountIds } = useUIStore();
+  const { openTransactionForm, openSettings, openExportImport, selectedAccountIds, setSelectedAccountIds } = useUIStore();
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [isAccountFilterOpen, setIsAccountFilterOpen] = useState(false);
 
@@ -51,9 +52,6 @@ function Header() {
     }
   };
 
-  const handleExport = () => {
-    window.open(transactionApi.getExportUrl(), '_blank');
-  };
 
   const handleAccountFilterChange = (accountId: number, checked: boolean) => {
     let newSelectedIds: number[];
@@ -224,14 +222,15 @@ function Header() {
               <span className="hidden sm:inline">重建历史</span>
             </button>
 
-            {/* 导出 */}
+            {/* 导出/导入 */}
             <button
-              onClick={handleExport}
+              onClick={openExportImport}
               className="px-3 py-2 rounded-lg font-medium transition-all bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700 hover:bg-slate-200 dark:hover:bg-slate-700 flex items-center gap-2"
-              title="导出交易记录"
+              title="导出/导入数据"
             >
               <Download className="w-4 h-4" />
-              <span className="hidden sm:inline">导出</span>
+              <Upload className="w-4 h-4" />
+              <span className="hidden sm:inline">数据</span>
             </button>
 
             {/* 新建交易 */}

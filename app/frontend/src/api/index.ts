@@ -405,6 +405,62 @@ export const targetApi = {
   },
 };
 
+// ==================== 导出/导入 API ====================
+
+export const exportImportApi = {
+  /**
+   * 导出所有数据
+   */
+  async exportAll(): Promise<{
+    accounts: string;
+    transactions: string;
+    cash_accounts: string;
+    targets: string;
+    metadata: {
+      export_date: string;
+      version: string;
+    };
+  }> {
+    const response = await fetch(`${API_BASE}/export/all`);
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.error || `导出失败: ${response.status}`);
+    }
+    return data.data;
+  },
+
+  /**
+   * 导出单个CSV文件
+   */
+  getExportUrl(type: 'accounts' | 'transactions' | 'cash_accounts' | 'targets'): string {
+    return `${API_BASE}/export/${type}`;
+  },
+
+  /**
+   * 导入数据
+   */
+  async import(data: {
+    accounts?: string;
+    transactions?: string;
+    cash_accounts?: string;
+    targets?: string;
+    options?: {
+      skipExisting?: boolean;
+      recalculateSnapshots?: boolean;
+    };
+  }): Promise<{
+    accounts: { success: number; errors: Array<{ row: number; error: string }> };
+    transactions: { success: number; errors: Array<{ row: number; error: string }> };
+    cash_accounts: { success: number; errors: Array<{ row: number; error: string }> };
+    targets: { success: number; errors: Array<{ row: number; error: string }> };
+  }> {
+    return request('/import', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  },
+};
+
 // ==================== 健康检查 ====================
 
 export const healthApi = {
@@ -423,6 +479,7 @@ export default {
   cashAccount: cashAccountApi,
   target: targetApi,
   settings: settingsApi,
+  exportImport: exportImportApi,
   health: healthApi,
 };
 

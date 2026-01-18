@@ -40,6 +40,7 @@ export interface Transaction {
   fee: number;
   currency: string;
   trade_date: string;
+  cash_account_id: number | null;
   created_at: string;
 }
 
@@ -54,6 +55,7 @@ export interface CreateTransactionRequest {
   fee?: number;
   currency?: string;
   trade_date: string;
+  cash_account_id?: number | null;
 }
 
 // 更新交易请求
@@ -67,6 +69,7 @@ export interface UpdateTransactionRequest {
   fee?: number;
   currency?: string;
   trade_date?: string;
+  cash_account_id?: number | null;
 }
 
 // 持仓

@@ -1,9 +1,9 @@
 import { useState, useEffect } from 'react';
 import { X, ArrowDown, ArrowUp } from 'lucide-react';
 import { usePortfolioStore, useUIStore } from '../store';
-import { accountApi } from '../api';
+import { accountApi, cashAccountApi } from '../api';
 import { getTodayET } from '../utils/timeUtils';
-import type { CreateTransactionRequest, Account } from '../../../shared/types';
+import type { CreateTransactionRequest, Account, CashAccount } from '../../../shared/types';
 
 function TransactionForm() {
   const { createTransaction, holdings } = usePortfolioStore();
@@ -14,6 +14,8 @@ function TransactionForm() {
   const [type, setType] = useState<'buy' | 'sell'>(transactionFormType);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [selectedAccountId, setSelectedAccountId] = useState<number>(1); // 默认账户ID为1
+  const [cashAccounts, setCashAccounts] = useState<CashAccount[]>([]);
+  const [selectedCashAccountId, setSelectedCashAccountId] = useState<number | null>(null);
   
   const [formData, setFormData] = useState({
     symbol: selectedSymbol || '',
@@ -31,6 +33,15 @@ function TransactionForm() {
     accountApi.list().then(accs => {
       if (accs.length > 0) {
         setSelectedAccountId(accs[0].id);
+      }
+    }).catch(console.error);
+    
+    // 加载现金账户列表
+    cashAccountApi.list().then(accs => {
+      setCashAccounts(accs);
+      // 如果有现金账户，设置第一个为默认选中
+      if (accs.length > 0) {
+        setSelectedCashAccountId(accs[0].id);
       }
     }).catch(console.error);
   }, []);
@@ -106,6 +117,7 @@ function TransactionForm() {
         quantity: parseFloat(formData.quantity),
         fee: formData.fee ? parseFloat(formData.fee) : 0,
         trade_date: tradeDate,
+        cash_account_id: selectedCashAccountId || null,
       };
 
       // 基础验证
@@ -214,6 +226,30 @@ function TransactionForm() {
                 </option>
               ))}
             </select>
+          </div>
+
+          {/* 现金账户选择 */}
+          <div>
+            <label className="block text-sm font-medium text-slate-600 dark:text-slate-400 mb-1.5">
+              {type === 'buy' ? '从现金账户扣除' : '存入现金账户'} {cashAccounts.length > 0 ? '' : '(可选)'}
+            </label>
+            <select
+              value={selectedCashAccountId || ''}
+              onChange={(e) => setSelectedCashAccountId(e.target.value ? parseInt(e.target.value, 10) : null)}
+              className="w-full px-3 py-2 rounded-lg bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-100 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 transition-all"
+            >
+              <option value="">不关联现金账户</option>
+              {cashAccounts.map(cashAccount => (
+                <option key={cashAccount.id} value={cashAccount.id}>
+                  {cashAccount.account_name} (余额: ${cashAccount.amount.toLocaleString()})
+                </option>
+              ))}
+            </select>
+            {cashAccounts.length === 0 && (
+              <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                暂无现金账户，可在"现金账户"页面添加
+              </p>
+            )}
           </div>
 
           {/* 股票代码 */}

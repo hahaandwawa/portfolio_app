@@ -136,6 +136,18 @@ async function migrate() {
         `);
       }
       
+      // 2.1. 为 transactions 表添加 cash_account_id 列
+      if (!columnExists(db, 'transactions', 'cash_account_id')) {
+        console.log('为 transactions 表添加 cash_account_id 列...');
+        db.run(`
+          ALTER TABLE transactions 
+          ADD COLUMN cash_account_id INTEGER
+        `);
+        console.log('✓ 已为 transactions 表添加 cash_account_id 列');
+      } else {
+        console.log('✓ transactions 表的 cash_account_id 列已存在');
+      }
+      
       // 3. 为 holdings 表添加 account_id 列并更新主键
       if (!columnExists(db, 'holdings', 'account_id')) {
         console.log('为 holdings 表添加 account_id 列...');
